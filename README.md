@@ -201,7 +201,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 
 ## 变更记录
 
-- **2026-10-28（最新）**：阶梯门槛从 60 MB 提到 **100 MB**，并搬到 frontmatter 的 `metadata` 里变成可配置项（`min_size_for_ladder_mb` / `single_conn_fast_kbps`，`validate.ps1` 校验代码里的 `$ladderMinMB`/`$fastKB` 是否同步）；新增「第 5 步单连接探针 ≥3 MB/s 就跳过阶梯」这个免费判据；阶梯从 1/4/16 三档缩到 **1/16 两档 × 三遍**，胜出档加「波动 ≤2×」「两档差 10% 内选低并发」「多段快 1.25 倍才分段」。理由：节点不限速时 16 段实测 **0.72×**（单流 5,829 vs 16 段 4,175 KB/s），而阶梯本身要 20–26 秒、还可能顺带下载上百 MB 采样流量。
+- **2026-10-28（最新）**：`SKILL.md` 正文与围栏注释精简（+47 / −66 行）：`description` 收成一句、删掉与正文重复的实测数字罗列、压缩第 1/3/4/5/6 步的解释性注释。**行为、阈值与十一个步骤的顺序均未变化**，`validate.ps1` 仍 `VALIDATE_OK`。
+- 2026-10-28：阶梯门槛从 60 MB 提到 **100 MB**，并搬到 frontmatter 的 `metadata` 里变成可配置项（`min_size_for_ladder_mb` / `single_conn_fast_kbps`，`validate.ps1` 校验代码里的 `$ladderMinMB`/`$fastKB` 是否同步）；新增「第 5 步单连接探针 ≥3 MB/s 就跳过阶梯」这个免费判据；阶梯从 1/4/16 三档缩到 **1/16 两档 × 三遍**，胜出档加「波动 ≤2×」「两档差 10% 内选低并发」「多段快 1.25 倍才分段」。理由：节点不限速时 16 段实测 **0.72×**（单流 5,829 vs 16 段 4,175 KB/s），而阶梯本身要 20–26 秒、还可能顺带下载上百 MB 采样流量。
 - 更早：资产名校验闸门（`ASSET_NOT_FOUND` + 候选清单）、无 digest 降级（`DOWNLOAD_SIZE_OK_NO_DIGEST`）、`$winN` 真正驱动第 7 步分段数（此前阶梯测完但硬编码 `$parts = 16`）、`agents/openai.yaml` 与 `scripts/validate.ps1` 补齐。
 
 ## 限制
