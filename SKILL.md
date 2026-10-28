@@ -1,17 +1,17 @@
 ---
 name: github-release-download-acceleration
-description: 从 GitHub Releases 下载几十到几百 MB 的大资产时，先只读自检宿主环境（在监听的本地代理端口、系统代理/环境变量、本机 Clash Verge 内核与配置、curl 版本），并行实测「现有代理 / 无头拉起内核 / 公共镜像 / 直连」各路线 KB/s，在胜出路线上做限时并发阶梯，再用 curl 多段 range 并发下载并以 release digest 校验字节数与 SHA256，全程不要求预装 aria2/7z、不改系统代理、不向用户索要参数；用户给的资产文件名可能记错时先按 release API 校验，对不上就报 ASSET_NOT_FOUND 并列出真实候选，绝不静默换名。当用户说 GitHub 下载太慢、镜像不通、没装 Clash Verge、想让它自己挑下载方式、想多线程下大安装包、文件名可能记错、或只想「无脑下下来」时使用。
+description: 从 GitHub Releases 下载几十到几百 MB 的大资产时，先只读自检宿主环境（在监听的本地代理端口、系统代理/环境变量、本机 Clash Verge 内核与配置、curl 版本），并行实测「现有代理 / 无头拉起内核 / 公共镜像 / 直连」各路线 KB/s，在胜出路线上做限时并发阶梯，再用 curl 多段 range 并发下载并以 release digest 校验字节数与 SHA256；全程不要求预装 aria2/7z、不改系统代理、不向用户索要参数。资产名对不上就报 ASSET_NOT_FOUND 并列出真实候选，绝不静默换名。当用户说 GitHub 下载太慢、镜像不通、没装 Clash Verge、想让它自己挑下载方式、想多线程下大安装包、文件名可能记错、或只想「无脑下下来」时使用。
 whenToUse: 用户要把 GitHub Release 里的大文件（几十 MB 以上）下到本机且抱怨慢、镜像超时、网络受限；或不确定本机 Clash Verge 内核在不在跑；或用户说「别问我，自己看着办」「我电脑上什么都没装」；或资产文件名可能记错（先校验，对不上报 ASSET_NOT_FOUND，不猜文件名）；或用户明确要求「单流 vs 多线程」干净对照。
 metadata:
   min_size_for_ladder_mb: "100"
   single_conn_fast_kbps: "3072"
 ---
 
-# GitHub Release 大资产下载加速（自检环境 → 并行选路 → 限时阶梯 → digest 校验）
+# GitHub Release 大资产下载加速（自检 → 并行选路 → 限时阶梯 → digest 校验）
 
 目标：用户只说一句「帮我下这个 / 太慢了」，技能自己探清机器家底、实测选出最快路线、分段并发下载，最后用 release digest 闭环校验。**前置条件为零**：不假设装了 Clash Verge，不假设有 aria2/7z，不假设系统代理可用，也不需要用户报端口、路径或仓库名。
 
-围栏内代码都在 Windows PowerShell 5.1 上用夹具实跑过（2026-10：fzf 1.86MB 小资产、写错的资产名、obs-studio 223MB 大资产），不是伪代码；照抄前确认宿主是 5.1。**围栏内禁用 `Format-Table`/`Format-List`**：抽块按顺序连跑时上一条 `format-*` 会污染下一条输出（实测 `out-lineoutput` 顺序错误），统一用 `'{0,-28} ...' -f` 拼串。
+围栏内代码都在 Windows PowerShell 5.1 上用夹具实跑过（2026-10：fzf 1.86MB 小资产、写错的资产名、obs-studio 223MB 大资产、rclone 31.6MB），不是伪代码。**围栏内禁用 `Format-Table`/`Format-List`**：抽块按顺序连跑时上一条 `format-*` 会污染下一条输出（实测 `out-lineoutput` 顺序错误），统一用 `'{0,-28} ...' -f` 拼串。
 
 ## 环境自适应决策表（先读这张表再动手）
 
@@ -22,7 +22,7 @@ metadata:
 | 没装 Clash Verge，或配置目录/`clash-verge.yaml` 缺失、里面没有可用节点 | 跳过 B，走 C（镜像实测）+ D（直连多段） |
 | 镜像全灭或 <100 KB/s | D：直连多段，并发拉到 8–16（32 段实测无收益） |
 | 所有路线都 <100 KB/s 但仍有字节 | 取最高的一条照下，先报预计耗时再后台跑，别静默卡住，也别声明「无解」 |
-| 资产 <100 MB（默认门槛，见 frontmatter 的 `metadata.min_size_for_ladder_mb`） | 不测并发，单流 `curl -L` 一次拿完：阶梯要 20–26s + 上百 MB 采样，小包纯亏 |
+| 资产 <100 MB（`metadata.min_size_for_ladder_mb`） | 不测并发，单流 `curl -L` 一次拿完：阶梯要 20–26s + 上百 MB 采样，小包纯亏 |
 | 资产 ≥100 MB，但第 4/5 步的单连接探针 ≥3 MB/s（`metadata.single_conn_fast_kbps`） | 同样单流——单连接没被限速，多开线程只是把同一条管子切碎（实测 16 段 0.72×） |
 | 资产 ≥100 MB，且单连接 <3 MB/s 或探不到速度 | 跑 **1/16 两档**阶梯（每档三遍），多段必须快 1.25 倍才分段 |
 | 用户明确要「单流 vs 多段」对照 / 说「别硬套 16 线程」/ 小包也要证据 | 置 `$ForceLadder = $true`，跑 **1/4/16 三档**（每档三遍），结论按 1.25 倍规则给 |
@@ -75,7 +75,7 @@ metadata:
    } elseif ($u -match '^https?://github\.com/(?<o>[^/]+)/(?<r>[^/]+)/releases/tag/(?<t>[^/?#]+)') {
      $repo = "$($Matches.o)/$($Matches.r)"; $tag = $Matches.t; $asset = ''
    }
-   if (-not $repo) { throw 'BAD_URL: 既不是 /releases/download/ 也不是 /releases/tag/ 链接，先把 release 地址确定下来再交给本技能' }
+   if (-not $repo) { throw 'BAD_URL: 既不是 /releases/download/ 也不是 /releases/tag/ 链接，先把 release 地址确定下来' }
    "repo=$repo tag=$tag asset=$asset"
    ```
 
@@ -97,7 +97,7 @@ metadata:
      ForEach-Object { '{0,-12} {1,6} {2}' -f $_.ProcessName, $_.Id, $_.Path }
    ```
 
-2. **定位本机 Clash Verge 的内核与配置（找不到就跳过 B 路线，不要报错退出）。** 实测常装在非系统盘（`D:\Clash Verge`、`E:\Tools\Clash Verge`），候选要覆盖「标准安装目录 + 每个固定盘根 × `<盘>:\Clash Verge` 与 `<盘>:\Apps\Clash Verge` + 开始菜单快捷方式反查」，别只写死 C 盘。
+2. **定位本机 Clash Verge 的内核与配置（找不到就跳过 B 路线，不要报错退出）。** 实测常装在非系统盘（如 `D:\Clash Verge`、`E:\Tools\Clash Verge`），候选要覆盖「标准安装目录 + 每个固定盘根 × 常见安装子目录 + 开始菜单快捷方式反查」，别只写死 C 盘。
 
    ```powershell
    $coreDirs = @()
@@ -106,14 +106,14 @@ metadata:
    if ($env:LOCALAPPDATA) {
      $coreDirs += @((Join-Path $env:LOCALAPPDATA 'Programs\Clash Verge'), (Join-Path $env:LOCALAPPDATA 'Clash Verge'))
    }
-   # 只遍历本地固定盘（排除网络盘/光驱，避免 Test-Path 卡在离线盘上）；开销量级是毫秒。
+   # 只遍历本地固定盘（排除网络盘/光驱，避免 Test-Path 卡在离线盘上）
    foreach ($drv in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' } | ForEach-Object { $_.Name })) {
      $coreDirs += @((Join-Path $drv 'Clash Verge'), (Join-Path $drv 'Apps\Clash Verge'))
    }
    $coreDirs += @(Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue |
      Where-Object Name -match 'Clash.*Verge' |
      ForEach-Object { Split-Path (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName).TargetPath -Parent })
-   # 多份安装（升级残留、重装到别的盘）优先「最新的那个 exe」：旧内核配新配置会读不懂字段。
+   # 多份安装优先「最新的那个 exe」：旧内核配新配置会读不懂字段
    $picked = @($coreDirs | Where-Object { $_ -and (Test-Path (Join-Path $_ 'verge-mihomo.exe')) } |
      Sort-Object { (Get-Item (Join-Path $_ 'verge-mihomo.exe')).LastWriteTime } -Descending)
    $coreDir = $picked | Select-Object -First 1
@@ -132,7 +132,7 @@ metadata:
    $total = [int64]$total                 # 保留上一轮/用户已知的 total
    $want  = [string]$want                 # 保留上一轮/用户已知的 digest
    $tmp = Join-Path $env:TEMP ("meta_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-   if ($tmp -match ' ') { throw "SPACE_IN_PATH: $tmp 含空格，换一个不含空格的 TEMP/目录" }   # Start-Process 数组传参怕空格
+   if ($tmp -match ' ') { throw "SPACE_IN_PATH: $tmp 含空格，换一个不含空格的 TEMP/目录" }
    Start-Process curl.exe -NoNewWindow -Wait `
      -ArgumentList @('-sS','-L','-m','20','-A','dsh','-o',"$tmp.json",'-w','%{http_code}',
                      "https://api.github.com/repos/$repo/releases/tags/$tag") `
@@ -146,10 +146,8 @@ metadata:
 
    if ($apiLimited) {
      Remove-Item "$tmp.json","$tmp.code","$tmp.err" -Force -ErrorAction SilentlyContinue
-     # 未认证 API 限流不等于资产不可下，更不是 NO_ROUTE：已有 total/digest 就继续；
-     # 缺 total 就用一次 range 探针从 Content-Range 反推；digest 缺失时最后只做字节数校验。
      'API_RATE_LIMITED: 跳过资产名/API 元数据校验，改用已知 total/digest 或 Content-Range 继续'
-     if (-not $asset) { throw 'API_RATE_LIMITED_NEED_ASSET: API 限流且没给具体资产名，无法自动挑资产；请给完整资产直链或稍后重试' }
+     if (-not $asset) { throw 'API_RATE_LIMITED_NEED_ASSET: API 限流且没给具体资产名，请给完整资产直链或稍后重试' }
      $u0 = "https://github.com/$repo/releases/download/$tag/$asset"
      if ($total -le 0) {
        $hdr = Join-Path $env:TEMP ("range_{0}.hdr" -f [guid]::NewGuid().ToString('N').Substring(0,6))
@@ -176,7 +174,7 @@ metadata:
      } else {
        $a = $meta.assets | Where-Object { $_.name -eq $asset }
      }
-     if (-not $a) {                                       # 用户给的资产名对不上：报错并停，不许静默替换
+     if (-not $a) {                                       # 资产名对不上：报错并停，不许静默替换
        $at   = $asset -split '[-_.]'
        $near = $names |
          ForEach-Object { [pscustomobject]@{ Name=$_; Score=@(($_ -split '[-_.]') | Where-Object { $at -contains $_ }).Count } } |
@@ -193,11 +191,10 @@ metadata:
 
    规则：**资产名对不上 = 到此为止**，不测速、不下载、不拿「x64 换 amd64 / 点换横线」去猜；报 `ASSET_NOT_FOUND` + 候选清单（名字 + MB）+ 最接近的一条，等用户确认后从第 0 步重跑。候选清单必须来自 API 的 `assets`，不要手写。`$want` 为空 = 该 release 没有 digest（老资产常见），第 10 步只能做字节数基准并如实说明。同一失败路线不重复重试：每条探测只跑一次，`--retry` 只用在第 7 步真正的整包下载上。
 
-4. **组装候选路线并并行短测，每条路线都要真跑一次 range GET。** 只在第 3 步资产名校验通过后执行；直连永远作为兜底。超时压到 8s，`--connect-timeout 5`，串行会白等几十秒。**B 路线（本机内核）不在这步测**——内核还没起来，测出来的是直连，留到第 5 步。
+4. **组装候选路线并并行短测，每条路线都要真跑一次 range GET。** 只在第 3 步资产名校验通过后执行；直连永远作为兜底。超时压到 8s，`--connect-timeout 5`。**B 路线（本机内核）不在这步测**——内核还没起来，测出来的是直连，留到第 5 步。
 
    ```powershell
-   # 测速前置守卫：7897 没在监听时，任何「基线」都会是 code=000|got=0（实测 BASELINE bytes=0 code=000），
-   # 那只是「没有代理」，不能当单流对照。先跑第 5 步拉起内核并轮询到监听，再回来补测。
+   # 测速前置守卫：7897 没在监听时，任何「基线」都会是 code=000|got=0，不能当单流对照
    $port7897 = [bool](Get-NetTCPConnection -LocalPort 7897 -State Listen -ErrorAction SilentlyContinue)
    if (-not $port7897) { 'PORT_7897_NOT_LISTENING: 跳过 7897 基线；先跑第 5 步' }
 
@@ -209,8 +206,6 @@ metadata:
    $probes += @($mirrors | ForEach-Object { [pscustomobject]@{Name="C 镜像 $_"; Url="$_/$u"; Proxy=$null} })
    $probes += [pscustomobject]@{Name='D 直连'; Url=$u; Proxy=$null}
 
-   # 5.1 没有 -Parallel：逐条 Start-Process 拉起 curl，再统一 Wait-Process。
-   # 所有参数都不含空格（-w 用 | 分隔、输出到 NUL），这样数组传参才不会被拆坏。
    $pdir = Join-Path $env:TEMP ("probe_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
    New-Item -ItemType Directory $pdir -Force | Out-Null
    $run = foreach ($p in $probes) {
@@ -232,13 +227,12 @@ metadata:
        Bytes=($(if ($o[1] -match '^\d+$') { [int64]$o[1] } else { 0 }))
        KBps =$(if ($o[2] -match '^[\d.]+$') { [math]::Round([double]$o[2]/1KB,0) } else { 0 }) }
    }
-   # 先按「是否真的拿到 range 数据（Bytes ≥ 512KB）」排，再按速度排：镜像回一页 HTML 错误页也会「很快」。
+   # 先按「是否真的拿到 range 数据（Bytes ≥ 512KB）」排，再按速度排：镜像回一页 HTML 错误页也会「很快」
    $results | Sort-Object @{Expression={$_.Bytes -ge 524288};Descending=$true}, @{Expression='KBps';Descending=$true} |
      ForEach-Object { '{0,-28} code={1} bytes={2,9} KBps={3,6} 206={4}' -f $_.Name,$_.Code,$_.Bytes,$_.KBps,($_.Code -eq '206') }
-   # 节点可用判定必须要求 206（服务端接受 Range）：200 说明忽略了 Range 回了整包，不能当「限速证据」。
+   # 节点可用判定必须要求 206（服务端接受 Range）：200 说明忽略了 Range 回了整包
    $probe206 = @($results | Where-Object { $_.Code -eq '206' -and $_.Bytes -ge 1048576 })
    "PROBE_206_OK=$($probe206.Count)   (0 = 节点不可用/忽略 Range，别开测)"
-   # 基线守卫：只有 code=206/200 且 Bytes ≥ 1MB 的 A 路线才算「节点可用」。
    $aUsable = @($results | Where-Object { $_.Name -like 'A *' -and $_.Code -in '200','206' -and $_.Bytes -ge 1048576 })
    "A_usable=$($aUsable.Count)"
    Remove-Item $pdir -Recurse -Force -ErrorAction SilentlyContinue
@@ -253,7 +247,7 @@ metadata:
    $canStart = [bool]($coreDir -and (Test-Path (Join-Path $coreDir 'verge-mihomo.exe')))
    if (-not $canStart) { 'NO_CLASH_CORE: 没找到 verge-mihomo.exe，跳过 B 路线，只用镜像/直连' }
    elseif (-not (Get-NetTCPConnection -LocalPort 7897 -State Listen -ErrorAction SilentlyContinue)) {
-     (Get-Content "$cfgDir\config.yaml" -TotalCount 20 | Select-String 'mixed-port').Line   # 只确认端口，别把 secret/pipe 路径打进日志
+     (Get-Content "$cfgDir\config.yaml" -TotalCount 20 | Select-String 'mixed-port').Line   # 只确认端口，别把 secret 打进日志
      $core = Start-Process -FilePath (Join-Path $coreDir 'verge-mihomo.exe') `
        -ArgumentList @('-d',$cfgDir,'-f',"$cfgDir\clash-verge.yaml") -WindowStyle Hidden -PassThru
      $corePid = $core.Id
@@ -264,11 +258,9 @@ metadata:
    } else { 'PORT_7897_ALREADY_LISTENING: 用现成的，收尾不要停' }
    $up = [bool](Get-NetTCPConnection -LocalPort 7897 -State Listen -ErrorAction SilentlyContinue)
    "corePid=$corePid port7897=$up"
-   # 基线守卫：$up=False 时不要测 A/B 基线；此时 code=000/got=0 只能记为「无代理」。
 
    # 起来后补测 B 路线（必须带 -L：资产会 302 到 release-assets.githubusercontent.com）
-   # 用 Start-Process + 临时文件取结果，别写 `& curl ... 2>&1`：5.1 会把 curl 的 stderr 变成 ErrorRecord，
-   # 撞上 $ErrorActionPreference='Stop' 就成终止错误（TLS/DNS 一失败整条流程就死在这）。
+   # 用 Start-Process + 临时文件取结果，别写 `& curl ... 2>&1`：5.1 会把 curl 的 stderr 变成终止错误
    if ($up) {
      $bo   = Join-Path $env:TEMP ("probe_b_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
      $bnul = Join-Path $env:TEMP ("probe_b_{0}.bin" -f [guid]::NewGuid().ToString('N').Substring(0,6))
@@ -288,8 +280,7 @@ metadata:
      if ($bCode -notin '200','206' -or $bGot -lt ($needGot * 0.5)) { "B 不可用: raw=$raw err=$bErr" ; if ($corePid) { Stop-Process -Id $corePid -Force; $corePid = $null } }
    }
 
-   # 单连接证据：交给第 6 步判断「值不值得花 20 秒测并发」。
-   # 以 8MB 探针为准；1MB 探针会被建连 + TCP 慢启动拉低（实测同节点 1MB 段 742KB/s vs 整包单流 5829KB/s），只作兜底。
+   # 单连接证据：交给第 6 步判断「值不值得花 20 秒测并发」。以 8MB 探针为准；1MB 探针会被建连 + 慢启动拉低
    $singleKB = 0
    if ($up -and $bCode -in '200','206' -and $bGot -gt 0) { $singleKB = [int]$bKBps }
    if ($singleKB -le 0 -and $aUsable) {
@@ -301,13 +292,13 @@ metadata:
 
    15 秒内没起来、或 `code` 不是 206/200、或 `got` 远小于 8388608，就判定 B 不可用：`if ($corePid) { Stop-Process -Id $corePid -Force }`，回 C/D 路线，别让半死的内核占着 7897 干扰后面的分段。
 
-6. **先判值不值得测，再在胜出路线上做限时阶梯。** 默认只有「资产 ≥100 MB 且单连接探针 <3 MB/s」才测，且只测 **1/16 两档**；用户要「单流 vs 多段」对照、或说「别硬套 16 线程」、或小包也要证据时，置 `$ForceLadder = $true` 测 **1/4/16 三档**。每档开 n 条连接、从各自起点读到文件尾，**只跑同样几秒**（`-m $sec`），比同一时间窗内的聚合吞吐；**同时看「完成连接数」**——某条 0 字节但其它连接很快时总 KB/s 会骗人。**每档三遍、交错进行，报中位数与 min–max 波动**：单次采样噪声极大（实测同一 1MB 段 72 KB/s 与 2,245 KB/s 并存）。历史形状（2026-10，限速期）：1 段 4.9 MB/s、4 段 5.3、**16 段 7.7（最优）**、24 段 6.0、32 段 6.3，所以默认档只测 1/16；节点不限速时（同日另一时段）整包单流 5.8 反而快过 16 段 4.2，必须现测。
+6. **先判值不值得测，再在胜出路线上做限时阶梯。** 默认只有「资产 ≥100 MB 且单连接探针 <3 MB/s」才测，且只测 **1/16 两档**；用户要「单流 vs 多段」对照、或说「别硬套 16 线程」、或小包也要证据时，置 `$ForceLadder = $true` 测 **1/4/16 三档**。每档开 n 条连接、从各自起点读到文件尾，**只跑同样几秒**（`-m $sec`），比同一时间窗内的聚合吞吐；**同时看「完成连接数」**。**每档三遍、交错进行，报中位数与 min–max 波动**：单次采样噪声极大（实测同一 1MB 段 72 KB/s 与 2,245 KB/s 并存）。
 
    ```powershell
    function Test-Ladder([int]$n,[string]$url,[string]$proxy,[int64]$total=0,[int]$sec=4) {
      if ($n -lt 1) { return }
      # 每段从各自起点 open-range 到文件尾，只跑 $sec 秒（--max-time 到点就断，curl exit 28 属正常）。
-     # 别用固定 1MB/8MB 小段：小段的时间被建连 + TCP 慢启动吃掉，阶梯会一边倒地偏向高并发。
+     # 别用固定 1MB/8MB 小段：小段时间被建连 + 慢启动吃掉，阶梯会一边倒偏向高并发。
      $per = if ($total -gt 0) { [int64][math]::Floor($total / $n) } else { [int64][math]::Floor(64MB / $n) }
      $dir = Join-Path $env:TEMP ("ladder_{0}_{1}" -f $n,[guid]::NewGuid().ToString('N').Substring(0,4))
      New-Item -ItemType Directory $dir -Force | Out-Null
@@ -338,28 +329,24 @@ metadata:
      $line = '{0,2} 段: 完成 {1}/{0}  {2,7:N1} MB / {3,4:N1}s = {4,6:N0} KB/s' -f `
        $n, $ok, ($bytes/1MB), $sw.Elapsed.TotalSeconds, $kbps
      Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-     # 既打印给人看，也把结果交给第 7 步选并发数——只打印不返回，阶梯就白测了。
+     # 既打印给人看，也把结果交给第 7 步选并发数——只打印不返回，阶梯就白测了
      [pscustomobject]@{ N = $n; Full = $ok; KBps = $kbps; Text = $line }
    }
    # 胜出路线（第 4/5 步的结果）：镜像胜出就换 $winUrl，直连/镜像胜出就把 $winProxy 置 $null
-   $winUrl   = $u                       # 例："https://ghfast.top/$u"
+   $winUrl   = $u
    $winProxy = 'http://127.0.0.1:7897'
-   # 先判「值不值得测」：阶梯 ≈ 20–26s，节点快时还要顺带下载上百 MB 采样流量，小包纯亏。
-   # 判据用第 5 步的 8MB 单连接探针（$singleKB）——它直接检验并发收益的前提「单连接是否被限速」。
-   # 两个阈值来自 frontmatter.metadata（改阈值就改 SKILL.md 头部，validate.ps1 会校验这里同步过）。
-   # 用户明确要「单流 vs 多段」对照 / 「别硬套 16 线程」时置 $true → 跑 1/4/16 宽阶梯。
+   # 判据用第 5 步的 8MB 单连接探针（$singleKB）——它直接检验并发收益的前提「单连接是否被限速」
+   # 两个阈值来自 frontmatter.metadata（改阈值就改 SKILL.md 头部，validate.ps1 会校验这里同步过）
    $ForceLadder = $false
    $ladderMinMB = 100            # = metadata.min_size_for_ladder_mb
    $fastKB      = 3072           # = metadata.single_conn_fast_kbps（3 MB/s）
    $bigEnough   = ($total -ge ($ladderMinMB * 1MB))
    $throttled   = ($singleKB -le 0) -or ($singleKB -lt $fastKB)
-   # 默认窄阶梯只测 1/16：4 段极少单独胜出（同日实测 4.24 vs 16 3.95，差异在噪声内），砍掉省 1/3 测量时间。
+   # 默认窄阶梯只测 1/16：4 段极少单独胜出（同日实测 4.24 vs 16 3.95，差异在噪声内）
    if ($ForceLadder) { $rungs = @(1,4,16) } else { $rungs = @(1,16) }
    $runs  = @()
    $ladderSec = 0; $sampleMB = 0
    if ($ForceLadder -or ($bigEnough -and $throttled)) {
-     # 每档只跑几秒、各段同时开跑：比「同一时间窗内的聚合吞吐」，与资产大小无关，也不受块大小影响。
-     # 每档三遍、交错进行：单次采样噪声极大（同一路线同一天实测 72KB/s 与 2245KB/s 都出现过）。
      $sec = 4
      $swL = [Diagnostics.Stopwatch]::StartNew()
      foreach ($rep in 1..3) { foreach ($n in $rungs) { $runs += @(Test-Ladder $n $winUrl $winProxy $total $sec) } }
@@ -381,9 +368,8 @@ metadata:
      [pscustomobject]@{ N = $n; Full = ($s | Measure-Object Full -Minimum).Minimum
        Med = $med; Min = $vals[0]; Max = $vals[$vals.Count - 1]; Spread = $spread }
    }
-   # 每档都要把中位数和实测 min–max 一起打出来：只报中位与「<=2x 的界」等于没报波动。
    $agg | ForEach-Object { '{0,2} 段: 完成 {1}/{0}  中位 {2,6} KB/s  min–max {3}-{4} KB/s  波动 {5}x' -f $_.N,$_.Full,$_.Med,$_.Min,$_.Max,$_.Spread }
-   # 胜出档：先要求「完成数 = n/n」且三次波动 ≤2×，再比中位 KB/s；多段必须快过单段 1.25 倍才值得用。
+   # 胜出档：先要求「完成数 = n/n」且三次波动 ≤2×，再比中位 KB/s；多段必须快过单段 1.25 倍才值得用
    $best = $agg | Where-Object { $_.Full -ge $_.N -and $_.Spread -le 2 } | Sort-Object Med -Descending | Select-Object -First 1
    if (-not $best) { $best = $agg | Where-Object { $_.Full -ge $_.N } | Sort-Object Med -Descending | Select-Object -First 1 }
    $n1   = $agg | Where-Object { $_.N -eq 1 } | Select-Object -First 1
@@ -421,14 +407,14 @@ for ($i = 0; $i -lt 30; $i++) {
 
 节点 OK 后分别整包跑两次：`$winN=1` 走第 7 步单流分支一次，再 `$parts=16` 跑一次分段（复制第 7 步、只改 `$parts`），两遍都用第 10 步的 digest 闭环，报告耗时、平均 KB/s 与相对倍数。API 403 限流时按第 3 步的 `API_RATE_LIMITED` 继续，用已知 total/先前 digest，不许报 `NO_ROUTE`。
 
-7. **按胜出组合下载：`$winN=1` 或小于 `$ladderMinMB` 单流一次拿完，否则按 `$winN` 段并发。先查空间、每段独立日志、带 `--retry`，并按 curl 版本决定是否加 `--retry-all-errors`。** 分片目录先清空重建；`--fail` 让 4xx/5xx 直接失败，避免把错误页写成合法分片；`-w` 用 `|` 分隔（**不能含空格**），每段独立日志，卡住时能定位到具体段。
+7. **按胜出组合下载：`$winN=1` 或小于 `$ladderMinMB` 单流一次拿完，否则按 `$winN` 段并发。先查空间、每段独立日志、带 `--retry`，并按 curl 版本决定是否加 `--retry-all-errors`。** 分片目录先清空重建；`--fail` 让 4xx/5xx 直接失败；`-w` 用 `|` 分隔（**不能含空格**）。
 
    ```powershell
    $ErrorActionPreference = 'Stop'
    $url   = '<第 4/5/6 步胜出的地址>'
    $proxy = 'http://127.0.0.1:7897'      # 直连/镜像路线就置 $null
    $parts = $winN                        # 第 6 步算出的胜出并发；1 就是单流
-   if (-not $parts) { $parts = 1 }       # 没有阶梯结果就单流，绝不退回写死的 16（本轮修掉的真 bug）
+   if (-not $parts) { $parts = 1 }       # 没有阶梯结果就单流，绝不退回写死的 16
    $total = [int64]$total                # 第 3 步已赋值；API 限流时来自 Content-Range
    $base  = Join-Path $env:USERPROFILE 'Downloads\_dl'   # 不写死盘符；空间不够再改到别的盘
    $dir   = Join-Path $base 'parts'
@@ -440,7 +426,7 @@ for ($i = 0; $i -lt 30; $i++) {
    $retry   = @('--retry','3','--retry-delay','2')
    if ($curlVer -ge [version]'7.71') { $retry += '--retry-all-errors' } else { "RETRY_DEGRADED: curl $curlVer < 7.71，只用 --retry 3 --retry-delay 2" }
 
-   # 决策表落地：`$winN` 判成单流、或小于 ladderMinMB、或 total 未知时，不分段，一次拿完（分段只增加失败面）
+   # 决策表落地：`$winN` 判成单流、或小于 ladderMinMB、或 total 未知时，不分段
    if (-not $ladderMinMB) { $ladderMinMB = 100 }   # 单块连跑（没执行第 6 步）时也要有值
    if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
      New-Item -ItemType Directory (Split-Path -Parent $out) -Force | Out-Null
@@ -455,8 +441,8 @@ for ($i = 0; $i -lt 30; $i++) {
      if ($total -le 0) { $total = (Get-Item $out).Length; "total_from_download=$total" }
      $parts = 1
    } else {
-     # 决策表落地：每段至少 2MB，否则 16 个进程的调度开销比省下的时间还多。
-     if ($dir -match ' ') { throw "SPACE_IN_PATH: $dir 含空格，5.1 的 Start-Process 会把 -o 参数拆坏，请换到不含空格的目录" }
+     # 每段至少 2MB，否则 16 个进程的调度开销比省下的时间还多
+     if ($dir -match ' ') { throw "SPACE_IN_PATH: $dir 含空格，5.1 的 Start-Process 会把 -o 参数拆坏" }
      if ($parts -gt 1 -and [math]::Floor($total / $parts) -lt 2MB) { $parts = [math]::Max(1, [int][math]::Floor($total / 2MB)) }
 
      # 空间预检：分片和成品要同时存在，约需 2 倍资产大小
@@ -489,7 +475,7 @@ for ($i = 0; $i -lt 30; $i++) {
 
    记下 `$curlPids`：收尾和降档时只杀这些 pid，别 `Stop-Process -Name curl` 把用户自己的下载一起杀了。
 
-8. **分段时后台跑 + 45 秒看一次增长；20–30s 还是 0 字节就自己降档重开。** 只停自己那批 `$curlPids`、清空分片、**降并发（16→8→4）或切到候选第二名路线**再开，不要靠再加并发救场。**单流分支（`$parts = 1`）跳过本步和第 9 步，直接到第 10 步。**
+8. **分段时后台跑 + 45 秒看一次增长；20–30s 还是 0 字节就自己降档重开。** 只停自己那批 `$curlPids`、清空分片、**降并发（16→8→4）或切到候选第二名路线**再开。**单流分支（`$parts = 1`）跳过本步和第 9 步，直接到第 10 步。**
 
    ```powershell
    $before = (Get-ChildItem $dir -Filter 'p*.bin' | Measure-Object Length -Sum).Sum
@@ -509,7 +495,7 @@ for ($i = 0; $i -lt 30; $i++) {
    "parts=$sum total=$total sumOk=$($sum -eq $total)"
    Get-ChildItem $dir -Filter 'p*.log' | ForEach-Object { "  $($_.Name): $((Get-Content $_.FullName -Raw).Trim())" }
    if ($sum -ne $total) { throw "PARTS_MISMATCH: sum=$sum total=$total，先修分片再拼" }
-   New-Item -ItemType Directory (Split-Path -Parent $out) -Force | Out-Null   # $out 的父目录可能不存在
+   New-Item -ItemType Directory (Split-Path -Parent $out) -Force | Out-Null
    $fs = [IO.File]::Create($out)
    for ($i=0; $i -lt $parts; $i++) {
      $p = Join-Path $dir "p$i.bin"
@@ -571,27 +557,22 @@ for ($i = 0; $i -lt 30; $i++) {
 
 ```powershell
 $root = '<技能目录>'
-# validate.ps1 必须是 UTF-8 with BOM：5.1 会把无 BOM 的 UTF-8 当 GBK 读，中文字符串里的引号被吞掉（实测 exit=1）
+# validate.ps1 必须是 UTF-8 with BOM：5.1 会把无 BOM 的 UTF-8 当 GBK 读，中文字符串里的引号被吞掉
 $b = [IO.File]::ReadAllBytes((Join-Path $root 'scripts\validate.ps1'))
 "validateBOM=$($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)"
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\validate.ps1')
 "exit=$LASTEXITCODE"
-```
-
-改阈值后必须做**反向测试**才算验证完成：只改 metadata（100→80）应 FAIL/exit=1，还原后 exit=0。写回 SKILL.md 用 `UTF8Encoding($false)`，别用 `Out-File`/`Set-Content`（5.1 会加 BOM，而验收要求 SKILL.md BOM=False）：
-
-```powershell
-$sk = Join-Path '<技能目录>' 'SKILL.md'; $v = Join-Path '<技能目录>' 'scripts\validate.ps1'
+# 反向测试：只改 metadata（100→80）必须 FAIL/exit=1，还原后 exit=0
+$sk = Join-Path $root 'SKILL.md'; $v = Join-Path $root 'scripts\validate.ps1'
 $enc = New-Object System.Text.UTF8Encoding($false)
 $bak = [IO.File]::ReadAllText($sk,[Text.Encoding]::UTF8)
-powershell -NoProfile -ExecutionPolicy Bypass -File $v | Select-String 'VALIDATE'; "exit=$LASTEXITCODE"
 [IO.File]::WriteAllText($sk, ($bak -replace 'min_size_for_ladder_mb: "100"','min_size_for_ladder_mb: "80"'), $enc)
 '--- 只改 metadata ---'; powershell -NoProfile -ExecutionPolicy Bypass -File $v | Select-String 'VALIDATE|不一致'; "exit=$LASTEXITCODE"
 [IO.File]::WriteAllText($sk, $bak, $enc)
 '--- 还原 ---'; powershell -NoProfile -ExecutionPolicy Bypass -File $v | Select-String 'VALIDATE'; "exit=$LASTEXITCODE"
 ```
 
-DSH 是否能发现这个技能要单独验证——技能目录必须落在技能发现根里：
+写回 SKILL.md 用 `UTF8Encoding($false)`，别用 `Out-File`/`Set-Content`（5.1 会加 BOM，而验收要求 SKILL.md BOM=False）。DSH 是否能发现这个技能要单独验证——技能目录必须落在技能发现根里：
 
 ```powershell
 $src = '<项目目录>\.dsh\skills\github-release-download-acceleration'
@@ -599,7 +580,7 @@ $dst = "$env:USERPROFILE\.dsh\skills\github-release-download-acceleration"
 if (-not (Test-Path $dst)) { cmd /c mklink /J "$dst" "$src" }
 ```
 
-建好 junction 后**必须用 `skill` 工具真正加载一次**（实测：junction 之前 `skill` 报 `unknown or no longer available`，建好后加载成功）；只看 `Test-Path` 为真不能证明 DSH 能加载。报告里要写「`skill` 工具返回了技能名/正文」这类证据，不能拿目录列举代替。
+建好 junction 后**必须用 `skill` 工具真正加载一次**（实测：junction 之前 `skill` 报 `unknown or no longer available`，建好后加载成功）；只看 `Test-Path` 为真不能证明 DSH 能加载。报告里要写「`skill` 工具返回了技能名/正文」这类证据。
 
 ### 网络全断时的离线夹具（不产生真实下载流量）
 
@@ -645,12 +626,12 @@ Check (((& ([scriptblock]::Create('$ladderMinMB=100;$total=200MB;$total -lt ($la
 - **每段独立日志、重开前清空分片**，否则分片全 0 时无法定位卡住的段；**拼装前必须核对分片总字节数**，大小对而内容错的失败最难发现；**digest 为空时不要伪造校验**。
 - **只杀自己的进程。** `Stop-Process -Name curl` 会把用户自己正在跑的下载一起杀掉；收尾和降档只能用记下的 `$curlPids`，内核只用 `$corePid`；若用户原本就开着代理，收尾不要关它。
 - **`curl` 的 `-w` 串里不要有空格**（5.1 的 `Start-Process -ArgumentList` 不加引号，含空格的参数被拆开 → `-o` 失效、响应体进 stdout、分片 0 字节）。用 `|` 分隔、`-A dsh`，或整条命令串自己加引号。
-- **围栏代码块里不要混用 `Format-Table`/`Format-List`**：抽块连续执行时上一个 `format-*` 的 `FormatEntryData` 会污染下一条输出（`out-lineoutput : “...FormatEntryData”类型的对象无效`），统一用 `'{0,-28} ...' -f`。
+- **围栏代码块里不要混用 `Format-Table`/`Format-List`**：抽块连续执行时上一个 `format-*` 的 `FormatEntryData` 会污染下一条输出，统一用 `'{0,-28} ...' -f`。
 - **别写 `$x =(if …)`**（5.1 里 `if` 是语句，报 `The term 'if' is not recognized`）：用 `$x =$(if (…) {…} else {…})`。**`$array += 管道` 要用 `@()` 包住右边**。
-- **别用 `& curl … 2>&1` 收结果**：5.1 会把原生 stderr 变成 ErrorRecord，撞上 `$ErrorActionPreference='Stop'` 就是终止错误（实测 `curl: (35) schannel: failed to receive handshake` 直接中断）。统一 `Start-Process -RedirectStandardOutput/-RedirectStandardError` 两个文件再 `Get-Content -Raw`；单流分支用 `& curl.exe @arg`（不加 `2>&1`）。
+- **别用 `& curl … 2>&1` 收结果**：5.1 会把原生 stderr 变成 ErrorRecord，撞上 `$ErrorActionPreference='Stop'` 就是终止错误。统一 `Start-Process -RedirectStandardOutput/-RedirectStandardError` 两个文件再 `Get-Content -Raw`；单流分支用 `& curl.exe @arg`（不加 `2>&1`）。
 - **`--retry-all-errors` 要 7.71+**，Win10 自带 7.55 会报 `unknown option`；第 7 步先 `curl.exe -V` 取版本，低于 7.71 只保留 `--retry 3 --retry-delay 2`（日志打 `RETRY_DEGRADED`）。
 - **同一条路线在不同时刻能差两个数量级**：同日同一节点、同样 1MB 段 `14.2s = 72KB/s` 与 `0.5s = 2245KB/s` 并存，整包 16 段也从 `1355` 波动到 `6318 KB/s`。只跟同一时刻的另一条路线/另一档并发比。
-- **PowerShell 变量名大小写不敏感。** 写包装/测试脚本时 `$b = $raw -split '\|'` 会盖掉 `$B`（本轮实测报 `STRIP_MISS: url`，因为 `$BLK` 被第 5 步的 `$b` 顶掉）；中间变量加前缀区分。
+- **PowerShell 变量名大小写不敏感。** 写包装/测试脚本时 `$b = $raw -split '\|'` 会盖掉 `$B`（本轮实测报 `STRIP_MISS: url`）；中间变量加前缀区分。
 - **`<100MB 单流` 与「跳过阶梯」必须是代码，不是文字。** 只在决策表写「小资产不分段」而代码仍写死 `$parts = 16`，30MB 资产就会被切成 16 份；第 7 步必须 `if ($total -lt ($ladderMinMB * 1MB) -or $parts -le 1)` 走单流，`$parts` 只能来自第 6 步的 `$winN`；「不测并发」也要真跳过，别只打印一行。
 - **两个门槛写在 `metadata` 里，代码里也要有一份。** `min_size_for_ladder_mb`/`single_conn_fast_kbps` 是「测量成本 vs 收益」的取舍点；`$ladderMinMB`/`$fastKB` 必须一致，`validate.ps1` 比对两处数字，改一边忘另一边直接 FAIL（有意的冗余：5.1 没有 YAML 解析器）。
 - **阶梯结果必须喂给第 7 步。** 曾经的真缺陷：`Test-Ladder` 只打印不返回、第 7 步硬编码 `$parts = 16`，于是「测了阶梯但完全没用上」，节点不限速时反而比单流慢（整包 5.8 vs 4.2 MB/s，0.72×）。函数要返回 `N/Full/KBps`，调用侧汇总出 `$winN`，并把 1.25 倍规则写进最终回答。
@@ -661,7 +642,7 @@ Check (((& ([scriptblock]::Create('$ladderMinMB=100;$total=200MB;$total -lt ($la
 - **`web_fetch` 抓 GitHub 页面可能直接 fetch failed**，别反复重试，直接用 `curl.exe` + API。
 - **写技能自己的 .ps1 必须带 BOM**：`[IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($true)))`；无 BOM 时 5.1 按 GBK 解码，中文引号被吞，`validate.ps1` 首跑就 exit=1。写回 SKILL.md 时相反：`UTF8Encoding($false)` 保持 BOM=False。
 - **`param()` 默认值里 `$PSScriptRoot` 是空的**：不能写 `param([string]$SkillRoot = $PSScriptRoot)`，要在脚本体里 `if (-not $SkillRoot) { $SkillRoot = $PSScriptRoot }`，再用 `(Get-Location).Path` 兜底。
-- **`Get-ChildItem -Filter` 只接受单个字符串**（传数组报「无法将“System.Object[]”转换为…“System.String”」）；多模式过滤用 `Where-Object Name -like`。**清理残留时别用带括号的 `-match` 正则**：实测 `-match '^(ladder_|probe_...'` 少个右括号直接抛 `ArgumentException`。
+- **`Get-ChildItem -Filter` 只接受单个字符串**（传数组报「无法将"System.Object[]"转换为…"System.String"」）；多模式过滤用 `Where-Object Name -like`。**清理残留时别用带括号的 `-match` 正则**：实测少个右括号直接抛 `ArgumentException`。
 - **`skill` 工具报 `unknown or no longer available` 是发现路径问题**，不是文件坏了：先确认技能目录在发现根内（必要时建 junction），再用 `skill` 工具实加载验证。
 - TODO：若宿主已装 aria2c，可用 `aria2c -x16 -s16 --all-proxy=...` 替代手写分段，但本技能未实测该路线，暂不纳入默认流程。
 
@@ -670,20 +651,20 @@ Check (((& ([scriptblock]::Create('$ladderMinMB=100;$total=200MB;$total -lt ($la
 - 自检输出能一句话说清选了哪条路线，且第 3 步打印过 `asset=… total=… digest=…`（API 限流时是 `API_RATE_LIMITED` + 已知 total/digest 或 `range_probe` 反推的 total）。
 - **错误路径演练**：拿真实 release 的不存在资产名（例：`fzf-0.65.2-windows-x64.zip`，真实是 `..._amd64.zip`）跑一遍，输出必须含 `ASSET_NOT_FOUND`、列出全部候选（名字 + MB）并指出最接近的一条，且**没有生成下载文件、没有进入第 4 步探测**。
 - 并行探测表里胜出路线 KB/s 明显高于其它，并打印 `PROBE_206_OK=1`（节点接受 Range）；任何 `bytes=0 code=000` 都被标成「无代理」，没拿来当单流对照。
-- **门槛可配**：`metadata.min_size_for_ladder_mb` 是 `"100"`、`metadata.single_conn_fast_kbps` 是 `"3072"`，与第 6/7 步的 `$ladderMinMB=100`/`$fastKB=3072` 一致；决策表、第 6 步判定、第 7 步单流分支、Pitfalls、README 措辞同步，用下面这条命令证明**无旧值残留**（输出应为 0 行，命中行必须逐条解释）：
+- **门槛可配**：`metadata.min_size_for_ladder_mb` 是 `"100"`、`metadata.single_conn_fast_kbps` 是 `"3072"`，与第 6/7 步的 `$ladderMinMB=100`/`$fastKB=3072` 一致；决策表、第 6 步判定、第 7 步单流分支、Pitfalls、README 措辞同步，用下面这条命令证明**无旧值残留**（`old_threshold_hits` 必须是 0，命中行必须逐条解释）：
 
   ```powershell
   $d = '<技能目录>'
   Select-String -Path "$d\SKILL.md","$d\README.md" -Pattern '60MB','<20MB','1/4/16 三档','\$parts = 16' |
     ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }
-  "old_threshold_hits=" + @(Select-String -Path "$d\SKILL.md","$d\README.md" -Pattern '60MB','<20MB','\$parts = 16').Count   # 必须是 0
+  "old_threshold_hits=" + @(Select-String -Path "$d\SKILL.md","$d\README.md" -Pattern '60MB','<20MB','\$parts = 16').Count
   ```
 
 - **改一半会被拦住**：只把 metadata 改成 80 时 `validate.ps1` 输出 `[FAIL] … 不一致：改阈值要两处同步` 且 `exit=1`；两处同步后 `VALIDATE_OK: 0 个错误 / 0 个告警`、`exit=0`；测试后 SKILL.md 已还原且 `BOM=False`。
-- **小资产/快节点分支**：`$total < 100MB` 或 `$singleKB ≥ 3072` 时走单流，日志里有 `SKIP_LADDER: …`（带门槛值与「省下约 20–26s」）与 `SINGLE exit=0 code=200`（或 `code=206`），没有 `parts=` 分段行，`Get-FileHash` 与 digest 一致并输出 `DOWNLOAD_VERIFIED_OK`。
+- **小资产/快节点分支**：`$total < 100MB` 或 `$singleKB ≥ 3072` 时走单流，日志里有 `SKIP_LADDER: …`（带门槛值与「省下约 20–26s」）与 `SINGLE exit=0 code=200`（或 `206`），没有 `parts=` 分段行，`Get-FileHash` 与 digest 一致并输出 `DOWNLOAD_VERIFIED_OK`。
 - **限速节点分支**：1/16 两档各三遍、同一时间窗，逐档输出 `完成 n/n`、中位数、**实测 min–max** 与 `波动 Nx`，最后有 `LADDER_DONE: rungs=1/16 passes=3 elapsed=…s sample≈…MB` 与 `winN=…`；**不出现 4 段档**；`$parts` 与 `winN` 一致、没有写死 16。
 - **对照分支**：`$ForceLadder=$true` 时是 1/4/16 三档各三遍，逐档有 `完成 n/n` 与 min–max，输出 `winN=…`；单流不快于多段 1.25 倍时 `winN=1`，最终回答用一句话写清倍数与「为何不分段」。
-- **离线夹具（网络全断时）**：正则抽出全部 `powershell`/`pwsh`/`ps1` 围栏块，**报出块数与每块起始行号**（`blocks=14` 之后逐行 `block i: start_line=N`）；夹具在零真实下载流量下全 PASS——含 `SKIP_LADDER`（32MB）与 `winN=1`、单连接 4200KB/s 也跳过、以及 99MB→小资产 / 200MB→非小资产两档门槛断言。夹具 PASS 只能报成离线验证，不能当成下载实测。
+- **离线夹具（网络全断时）**：正则抽出全部 `powershell`/`pwsh`/`ps1` 围栏块，**报出块数与每块起始行号**（先 `blocks=N`，再逐行 `block i: start_line=N`）；夹具在零真实下载流量下全 PASS——含 `SKIP_LADDER`（32MB）与 `winN=1`、单连接 4200KB/s 也跳过、以及 99MB→小资产 / 200MB→非小资产两档门槛断言；跑完删临时夹具目录、`Get-ChildItem $env:TEMP` 无 `ladder_*`/`probe_*`/`meta_*`/`ghdl_*` 残留，并复跑 `validate.ps1` 得 exit=0。夹具 PASS 只能报成离线验证，不能当成下载实测。
 - **收尾与清理**：`validate.ps1 exit=0`；`%TEMP%` 下 `ladder_*`/`probe_*`/`meta_*`/`ghdl_*`/分片目录计数为 0（或说明保留原因）；`7897` 不再监听、`Get-Process verge-mihomo` 无本次残留、`ProxyEnable` 与开始时相同（初始 0）；只按 `$corePid`/`$curlPids` 以 Id 停进程，没有按名批量杀。
 - **加载证明**：`skill` 工具能真正加载 `github-release-download-acceleration`（返回技能名/正文），不是只看目录存在。
 - **第 2 步泛化**：真实机器打印 `core=<实际路径> cfg=<实际路径> candidates=<n>`；未安装时 `candidates=0`、`core=` 为空属正常；FakeSort 副本验证「两份安装选最新」输出 `SORT_PICK_NEWEST=True`；可执行围栏块里写死的盘符路径命中数为 0：
@@ -695,6 +676,6 @@ Check (((& ([scriptblock]::Create('$ladderMinMB=100;$total=200MB;$total -lt ($la
   "SKILL_MD_BOM=" + ([IO.File]::ReadAllBytes("<技能目录>\SKILL.md")[0] -eq 0xEF)     # 必须是 False
   ```
 
-- **围栏可执行性**：抽全部围栏块按顺序执行（只替换占位行），输出不含 `FormatEntryData`/`out-lineoutput` 报错；`validate.ps1` 退出码 0、`VALIDATE_OK: 0 个错误 / 0 个告警`、`SKILL.md` BOM=False、`agents/openai.yaml` 的 `short_description` 在 25–64 字符内且 `default_prompt` 含 `$github-release-download-acceleration`。
+- **围栏可执行性**：抽全部围栏块按顺序执行（只替换占位行），第 2 步块打印出实际命中的 `core`/`cfg`，输出不含 `FormatEntryData`/`out-lineoutput` 报错；`validate.ps1` 退出码 0、`VALIDATE_OK: 0 个错误 / 0 个告警`、`SKILL.md` BOM=False、`agents/openai.yaml` 的 `short_description` 在 25–64 字符内且 `default_prompt` 含 `$github-release-download-acceleration`。
 - **整包验收参考（2026-10，rclone 31,634,900 B）**：16 段 `31,634,900 B / 8.0s = 3,862 KB/s`，16 个分片全部 `206`、`MATCH_TOTAL=True`；干净对照要分别整包跑一次并各自 digest 校验，不能只拿 4 秒阶梯窗口当结论。
 - `p*.bin` 总字节数等于 `$total`（实测 223737114 / 31634900），拼装文件 `Length` 等于 release asset 的 `size`；`Get-FileHash -Algorithm SHA256` 与 digest hex 完全一致输出 `DOWNLOAD_VERIFIED_OK`，无 digest 时 `DOWNLOAD_SIZE_OK_NO_DIGEST` 并说明缺基准。
