@@ -1,0 +1,7 @@
+# Codex / OpenAI 宿主的展示元数据（machine-readable，不是给模型读的）。
+# DSH 不消费本文件，它只读 SKILL.md 的 frontmatter；保留此文件是为了跨宿主可移植。
+interface:
+  display_name: "GitHub Release 下载加速"
+  short_description: "自检代理与镜像，多段并发下载并用 digest 校验"
+  brand_color: "#2563EB"
+  default_prompt: "Use $github-release-download-acceleration to pick the fastest route and download this GitHub release asset."
