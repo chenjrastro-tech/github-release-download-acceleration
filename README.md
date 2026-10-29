@@ -201,6 +201,20 @@ metadata:
 | 强制阶梯 | 同上 | 6 次采样（1/16 各三遍）、2 行汇总、无 4 段档、`winN=1`，耗时 26.1 s |
 | 错误路径 | 不存在的 asset；`digest: null` 的老 release | `ASSET_NOT_FOUND` + 候选清单；`NO_DIGEST` + `DOWNLOAD_SIZE_OK_NO_DIGEST` |
 
+## 截图
+
+节点把单连接限速时的对照（213.4 MB：177.0 s → 28.2 s）：
+
+![直连 vs 16 段并发](assets/speedup-throttled.png)
+
+节点不限速时并发是负收益（30.2 MB：单流 5,829 KB/s vs 16 段 4,175 KB/s，0.72×）：
+
+![快节点上多段无收益](assets/no-gain-fast-node.png)
+
+技能跑完一次真实下载的实际输出（截取）：
+
+![技能实际输出](assets/report-sample.png)
+
 ## 自检
 
 ```powershell

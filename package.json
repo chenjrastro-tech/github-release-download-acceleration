@@ -40,7 +40,9 @@
     "LICENSE",
     "cordis.patch.yml",
     "agents",
-    "scripts"
+    "scripts",
+    "assets",
+    "screenshots.json"
   ],
   "license": "MIT",
   "author": "Duktig.",
