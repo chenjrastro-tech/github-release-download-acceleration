@@ -332,7 +332,11 @@ if ($runs.Count -gt 0 -and $bestR.Count -gt 0 -and $bestR[0].N -gt 1) {
   if (-not $one -or $bestR[0].Med -ge (1.25 * $one.Med)) { $winN = $bestR[0].N; $ratio = [math]::Round($bestR[0].Med / [math]::Max($one.Med, 1), 2) }
 }
 "winN=$winN ratio=${ratio}x elapsed=${ladderSec}s"
-if ($Parts -gt 0) { $winN = [int]$Parts; "PARTS_OVERRIDE: winN=$winN（手动指定并发段数）" }
+if ($Parts -gt 0) {
+  # 没有总字节数就算不出 range 边界：与其假装分段，不如说清原因后走单流
+  if ($total -gt 0) { $winN = [int]$Parts; "PARTS_OVERRIDE: winN=$winN（手动指定并发段数）" }
+  else { "PARTS_IGNORED: 总字节数未知（API 限流或不可达），无法切 range，改走单流"; $winN = 1 }
+}
 ```
 
 判定：只有「完成数 = n/n、三次波动 ≤2×」的档位能胜出；多段必须快过单段 1.25 倍才分段，否则 `$winN=1` 并把倍数写进报告。`$total` 未知时按 64MB 估起点。跳过阶梯是设计里的省时分支，不是漏测。
@@ -350,6 +354,11 @@ $base = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
 $dir  = Join-Path $base '_dl_parts'
 $out  = Join-Path $base $asset
 New-Item -ItemType Directory $base -Force | Out-Null
+# 小资产、单流足够快、或总字节数未知时都走单流；若是 -Parts 指定却被挡下，说清原因
+if ($Parts -gt 0 -and $winN -gt 1 -and ($total -le 0 -or $total -lt ($ladderMinMB * 1MB))) {
+  "PARTS_IGNORED: 资产 $([math]::Round($total/1MB,1))MB（闸值 ${ladderMinMB}MB）或总字节数未知，分段只会更慢，改走单流"
+  $winN = 1
+}
 if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
   $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $retry
   if ($winProxy) { $a += @('--proxy',$winProxy) }
@@ -487,7 +496,7 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 | 有代理时自动复用 | 已实测 | A 路线 range 实测后被选为胜出路线 |
 | 管理员权限 | 不需要 | 只读 HKCU，不改注册表/系统代理 |
 | Python / Node / aria2 / 7z / wget | 不需要 | 只用系统 curl + PowerShell/sha256 工具 || 一次性 runner `scripts/ghdl.ps1`（Windows） | 已实测 | 3 次真实下载全 `DOWNLOAD_VERIFIED_OK`：fzf 1.86MB（单流）、rclone 31.6MB（`-ForceLadder`）、OBS 223MB（`-Parts 16` 走拼装） |
-| 一次性 runner `scripts/ghdl.sh`（POSIX） | 未验证 | 只在 Git Bash 过 `sh -n`；dash/BSD sh 与真实 macOS/Linux 未跑 |
+| 一次性 runner `scripts/ghdl.sh`（POSIX） | 部分验证 | 在 Windows Git Bash（MSYS2，sh 5.x）跑通：单流下载 + `PARTS=16` 分段拼装 + SHA256 全对；真实 macOS/Linux、dash/BSD sh **未实测** |
 | 「真零前置」：PATH 只剩系统目录 + 清空 HTTP(S)_PROXY/ALL_PROXY | 已实测（Windows） | 非管理员会话、`PATH=C:\Windows{;\system32;\System32\WindowsPowerShell\v1.0}`，靠端口探测找到 7897，全程 SHA256 校验通过 |
 | frontmatter 最小公共集（只有 name + description） | 已实测 | 严格宿主遇到未知键会整条丢弃技能；触发条件写进 description，`validate.ps1` 只放行这两个键 |
 

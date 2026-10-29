@@ -55,6 +55,7 @@ esac
 rest=${URL#https://github.com/}
 owner=${rest%%/*}; rest=${rest#*/}
 repo_name=${rest%%/*}; rest=${rest#*/}
+rest=${rest#releases/}      # 去掉 releases/ 前缀，剩下 download/<tag>/<asset> 或 tag/<tag>
 tag=$(printf '%s' "$rest" | sed -n 's#^download/\([^/]*\)/.*#\1#p; s#^tag/\([^/]*\).*#\1#p' | head -n1)
 asset=$(printf '%s' "$rest" | sed -n 's#^download/[^/]*/\(.*\)#\1#p' | head -n1)
 repo="$owner/$repo_name"
@@ -75,13 +76,21 @@ echo "listen_port=${found_port:-(无)}"
 # ---------- 2. 资产名校验（API；403 限流就降级继续） ----------
 api="https://api.github.com/repos/$repo/releases/tags/$tag"
 tok=${GITHUB_TOKEN:-}
-if [ -n "$tok" ]; then
-  api_out=$(curl -sS -m 20 -H "Authorization: Bearer $tok" -w '\n%{http_code}' "$api" || echo "000")
-else
-  api_out=$(curl -sS -m 20 -w '\n%{http_code}' "$api" || echo "000")
+# api.github.com 在很多网络里必须走代理：复用第 1 步探测到的端口（环境变量代理优先）。
+# 下面的 $api_proxy 故意不加引号——它要么为空、要么正好是「--proxy http://...」两个词。
+api_proxy=""
+if [ -n "${PROXY:-}" ]; then api_proxy="--proxy $PROXY"
+elif [ -n "$found_port" ]; then api_proxy="--proxy http://127.0.0.1:$found_port"
 fi
-api_code=$(printf '%s' "$api_out" | tail -n1)
-api_body=$(printf '%s' "$api_out" | sed '$d')
+api_json="$tmpd/api.json"
+if [ -n "$tok" ]; then
+  api_code=$(curl -sS -m 20 $api_proxy -H "Authorization: Bearer $tok" -o "$api_json" -w '%{http_code}' "$api" 2>/dev/null || echo 000)
+else
+  api_code=$(curl -sS -m 20 $api_proxy -o "$api_json" -w '%{http_code}' "$api" 2>/dev/null || echo 000)
+fi
+api_code=$(printf '%s' "$api_code" | tr -dc '0-9' | tail -c 3)
+[ -n "$api_code" ] || api_code=000
+api_body=$(cat "$api_json" 2>/dev/null || true)
 
 if [ "$api_code" = "404" ]; then
   echo "RELEASE_NOT_FOUND: $repo tag=$tag" >&2
@@ -102,10 +111,18 @@ if [ "$api_code" = "200" ]; then
     printf '%s\n' "$names" | sed 's/^/  - /' >&2
     exit 1
   fi
-  TOTAL=$(printf '%s' "$api_body" | grep -o '"size": *[0-9]*' | sed 's/[^0-9]//g' | head -n1)
-  dig=$(printf '%s' "$api_body" | grep -o '"digest": *"sha256:[0-9a-fA-F]*"' | sed 's/.*sha256:\([0-9a-fA-F]*\)".*/\1/' | head -n1 || true)
-  [ -n "$dig" ] && WANT=$dig
-  # 多资产时上面的 size 可能不是目标资产的；有 jq 的环境里这是 trivial，这里只做尽力而为
+  # 多资产 release 里第一个 "size" 往往是别的资产的：先把 JSON 切成「一个资产一行的对象」，再取自己的
+  objs=$(printf '%s' "$api_body" | tr -d '\r\n' | awk '{gsub(/\}[ \t]*,[ \t]*\{/,"}\n{"); print}')
+  obj=$(printf '%s\n' "$objs" | grep -F "\"name\": \"$asset\"" | head -n1)
+  [ -n "$obj" ] || obj=$(printf '%s\n' "$objs" | grep -F "\"name\":\"$asset\"" | head -n1)
+  if [ -n "$obj" ]; then
+    TOTAL=$(printf '%s' "$obj" | grep -o '"size": *[0-9]*' | sed 's/[^0-9]//g' | head -n1)
+    dig=$(printf '%s' "$obj" | grep -o '"digest": *"sha256:[0-9a-fA-F]*"' | sed 's/.*sha256:\([0-9a-fA-F]*\)".*/\1/' | head -n1 || true)
+  else
+    TOTAL=$(printf '%s' "$api_body" | grep -o '"size": *[0-9]*' | sed 's/[^0-9]//g' | head -n1)
+    dig=""
+  fi
+  [ -n "${dig:-}" ] && WANT=$dig
   echo "asset=$asset total=${TOTAL:-0} want=${WANT:-(无 digest)} api=200"
 elif [ "$api_code" = "403" ]; then
   echo "API_RATE_LIMITED: 403，继续但只做字节校验；想提升限额可设 GITHUB_TOKEN"
@@ -185,16 +202,17 @@ echo "singleKB=$single_kbps"
 
 # ---------- 5. 1/16 限时阶梯（只在值得测的时候测） ----------
 rung() { # $1=n -> 输出 "n|kbps|full"
+  # 不依赖 date +%s%N（BSD/macOS 的 date 没有 %N），改用每条 curl 自报的 speed_download：
+  # 同一时间窗内并发 N 条的瞬时速度之和，就是这一档的聚合吞吐。
   n=$1; sec=4; dir="$tmpd/r$n"; mkdir -p "$dir"
-  start=$(date +%s%N 2>/dev/null || echo 0)
-  size=0; full=0; j=0
+  total_spd=0; full=0; j=0
   while [ $j -lt "$n" ]; do
     if [ -n "$win_proxy" ]; then
       curl -sS -L --connect-timeout 8 -m "$sec" -r "$((TOTAL / n * j))-" -A 'Mozilla/5.0' \
-        -o "$dir/p$j.bin" --proxy "$win_proxy" "$win_url" >/dev/null 2>&1 &
+        -o "$dir/p$j.bin" --proxy "$win_proxy" -w '%{speed_download}' "$win_url" > "$dir/s$j.txt" 2>/dev/null &
     else
       curl -sS -L --connect-timeout 8 -m "$sec" -r "$((TOTAL / n * j))-" -A 'Mozilla/5.0' \
-        -o "$dir/p$j.bin" "$win_url" >/dev/null 2>&1 &
+        -o "$dir/p$j.bin" -w '%{speed_download}' "$win_url" > "$dir/s$j.txt" 2>/dev/null &
     fi
     echo $! >> "$dir/pids"
     j=$((j+1))
@@ -203,21 +221,20 @@ rung() { # $1=n -> 输出 "n|kbps|full"
   for f in "$dir"/p*.bin; do
     [ -f "$f" ] || continue
     sz=$(wc -c < "$f" | tr -d ' ')
-    size=$((size + sz))
     [ "$sz" -gt 0 ] && full=$((full + 1))
   done
-  end=$(date +%s%N 2>/dev/null || echo 0)
-  if [ "$start" != "0" ] && [ "$end" != "0" ]; then
-    ms=$(( (end - start) / 1000000 )); [ "$ms" -lt 1 ] && ms=1
-    echo "$n|$(( size * 1000 / ms / 1024 ))|$full"
-  else
-    echo "$n|0|$full"
-  fi
+  for f in "$dir"/s*.txt; do
+    [ -f "$f" ] || continue
+    v=$(cat "$f" 2>/dev/null | tr -dc '0-9.')
+    [ -n "$v" ] || continue
+    total_spd=$(awk -v a="$total_spd" -v b="$v" 'BEGIN{printf "%d", a+b}')
+  done
+  echo "$n|$(( total_spd / 1024 ))|$full"
 }
 
 big_enough=0
 [ "${TOTAL:-0}" -ge $(( LADDER_MIN_MB * 1024 * 1024 )) ] && big_enough=1
-if [ "$FORCE_LADDER" = "1" ]; then
+if [ "$FORCE_LADDER" = "1" ] && [ "${TOTAL:-0}" -gt 0 ]; then
   rung16=$(rung 16); rung1=$(rung 1)
   echo "LADDER_DONE: rungs=1/16 passes=1 (sh 版只跑一遍)"
 elif [ "$big_enough" = "1" ] && [ "$single_kbps" -lt "$FAST_KBPS" ]; then
@@ -232,7 +249,14 @@ k1=$(printf '%s' "$rung1" | cut -d'|' -f2)
 k16=$(printf '%s' "$rung16" | cut -d'|' -f2)
 winN=1
 if [ "$k16" -gt 0 ] && [ "$k1" -gt 0 ] && [ "$k16" -ge $(( k1 * 125 / 100 )) ]; then winN=16; fi
-[ "$PARTS_OVERRIDE" -gt 0 ] && winN=$PARTS_OVERRIDE
+if [ "$PARTS_OVERRIDE" -gt 0 ]; then
+  if [ "${TOTAL:-0}" -gt 0 ]; then winN=$PARTS_OVERRIDE
+  else
+    # 没有总字节数就没法算 range 边界：与其假装分段，不如说清楚然后走单流
+    echo "PARTS_IGNORED: 总字节数未知（API 限流或不可达），无法切 range，改走单流" >&2
+    winN=1
+  fi
+fi
 echo "winN=$winN"
 
 # ---------- 6. 下载 ----------

@@ -120,7 +120,7 @@ powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -Parts 16  
 ```
 
 ```sh
-# macOS / Linux：未验证（只过了 sh -n 语法检查，见「支持矩阵」）
+# macOS / Linux：脚本已就绪但在真实 mac/Linux 上未实测（只在 Windows Git Bash 跑通，见「支持矩阵」）
 sh scripts/ghdl.sh '<release 直链>'
 ```
 

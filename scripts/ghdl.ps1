@@ -255,7 +255,11 @@ if ($runs.Count -gt 0 -and $bestR.Count -gt 0 -and $bestR[0].N -gt 1) {
   if (-not $one -or $bestR[0].Med -ge (1.25 * $one.Med)) { $winN = $bestR[0].N; $ratio = [math]::Round($bestR[0].Med / [math]::Max($one.Med, 1), 2) }
 }
 "winN=$winN ratio=${ratio}x elapsed=${ladderSec}s"
-if ($Parts -gt 0) { $winN = [int]$Parts; "PARTS_OVERRIDE: winN=$winN（手动指定并发段数）" }
+if ($Parts -gt 0) {
+  # 没有总字节数就算不出 range 边界：与其假装分段，不如说清原因后走单流
+  if ($total -gt 0) { $winN = [int]$Parts; "PARTS_OVERRIDE: winN=$winN（手动指定并发段数）" }
+  else { "PARTS_IGNORED: 总字节数未知（API 限流或不可达），无法切 range，改走单流"; $winN = 1 }
+}
 
 $ErrorActionPreference = 'Stop'
 $parts = $winN
@@ -267,6 +271,11 @@ $base = $OutDir
 $dir  = Join-Path $base '_dl_parts'
 $out  = Join-Path $base $asset
 New-Item -ItemType Directory $base -Force | Out-Null
+# 小资产、单流足够快、或总字节数未知时都走单流；若是 -Parts 指定却被挡下，说清原因
+if ($Parts -gt 0 -and $winN -gt 1 -and ($total -le 0 -or $total -lt ($ladderMinMB * 1MB))) {
+  "PARTS_IGNORED: 资产 $([math]::Round($total/1MB,1))MB（闸值 ${ladderMinMB}MB）或总字节数未知，分段只会更慢，改走单流"
+  $winN = 1
+}
 if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
   $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $retry
   if ($winProxy) { $a += @('--proxy',$winProxy) }
