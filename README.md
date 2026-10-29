@@ -41,8 +41,10 @@ github-release-download-acceleration/
 ├── index.js              # 技能 provider：把包里的 SKILL.md 挂进 ctx.skills（零依赖）
 ├── agents/
 │   └── openai.yaml       # Codex/OpenAI 宿主的展示元数据（DSH 不读这个文件）
-└── scripts/
-    └── validate.ps1      # 自检脚本：结构 / frontmatter / 5.1 兼容性 / 代码块语法
+├── scripts/
+│   └── validate.ps1      # 自检脚本：结构 / frontmatter / 5.1 兼容性 / 代码块语法
+├── assets/               # 市场卡片图标与实测截图
+└── screenshots.json      # 声明 1-8 张截图（市场详情页读取，放 package.json 旁边）
 ```
 
 **DeepSeek Harness（DSH）**
