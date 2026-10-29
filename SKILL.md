@@ -281,7 +281,10 @@ elseif ($coreDir -and $cfgDir -and (Test-Path (Join-Path $coreDir 'verge-mihomo.
 } else { 'NO_CLASH_CORE: 没找到内核/配置，跳过 B 路线' }
 $up = [bool](Test-Port '127.0.0.1' 7897)
 $bKB = 0
-if ($up) {
+if ($total -gt 0 -and $total -lt 100MB) {
+  # 小资产不管单连接快慢都走单流，花 8MB 请求去量单连接速度纯属浪费（30MB 资产能省 1-3 秒）
+  'SINGLE_KB_SKIPPED: 资产 <100MB，跳过 8MB 单连接测速（反正走单流）'
+} elseif ($up) {
   $need = $(if ($total -gt 0) { [math]::Min([int64]8388608, $total) } else { [int64]8388608 })   # 资产 <8MB 时只能拿回整包
   $br = Invoke-Curl @('-sS','-L','--connect-timeout','8','-m','20','-r','0-8388607','--proxy','http://127.0.0.1:7897','-A','Mozilla/5.0','-o','NUL','-w','%{http_code}|%{size_download}|%{speed_download}',$u)
   $b = $br.Out -split '\|'
