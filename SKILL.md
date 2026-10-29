@@ -84,8 +84,13 @@ if ($u -match '^https?://github\.com/(?<o>[^/]+)/(?<r>[^/]+)/releases/download/(
 } elseif ($u -match '^https?://github\.com/(?<o>[^/]+)/(?<r>[^/?#]+)/?$') {
   $repo = "$($Matches.o)/$($Matches.r)"    # 只给仓库：走 latest
 }
-if (-not $repo) { throw 'BAD_URL: 先把 release 直链或 tag 页地址确定下来' }
-"repo=$repo tag=$tag asset=$asset"
+$direct = $false
+if (-not $repo) {
+  # 不是 github.com：当作任意直链（自建 CDN / GitLab / 内网制品库都能用），只做字节校验
+  if ($u -match '^https?://') { $direct = $true; if (-not $asset) { $asset = ($u -split '[?#]')[0].Split('/')[-1] } }
+  else { throw 'BAD_URL: 先把 release 直链或 tag 页地址确定下来' }
+}
+"repo=$repo tag=$tag asset=$asset direct=$direct"
 ```
 
 1. **只读自检：探清家底，不装东西、不改系统、不问用户。** 端口真在监听才算数（`ProxyEnable` 残留值不算）；`Test-Port` 用 TcpClient 实现，5.1/7.x 和 POSIX 侧都能对上。
@@ -160,7 +165,13 @@ if ($onWin) {
 3. **取 release 元数据并校验资产名（测速前的硬闸门）。** 只给 tag 页就按 `size` 降序挑最大并说明理由；资产名对不上就到此为止，不测速、不下载、不拿「x64 换 amd64」去猜。
 
 ```powershell
-$total = [int64]0; $want = ''
+$total = [int64]0; $want = ''; $api = 'skip'
+if ($direct) {
+  # 没有 GitHub API 可问：用 1 字节 range 的 Content-Range 反推总长，拿不到就按未知处理（后面走单流）
+  $h = Invoke-Curl @('-sS','-L','-m','20','-A','dsh','-r','0-0','-D','-','-o','NUL',$u)
+  if ($h.Out -match '(?im)content-range:\s*bytes\s+\d+-\d+/(\d+)') { $total = [int64]$Matches[1] }
+  $api = 'direct'
+} else {
 $apiUrl = $(if ($tag) { "https://api.github.com/repos/$repo/releases/tags/$tag" } else { "https://api.github.com/repos/$repo/releases/latest" })
 $metaF = Join-Path $env:TEMP ("meta_{0}.json" -f [guid]::NewGuid().ToString('N').Substring(0,6))
 $mr = Invoke-Curl @('-sS','-L','-m','20','-A','dsh','-o',$metaF,'-w','%{http_code}',$apiUrl)
@@ -192,14 +203,20 @@ if ($code -eq '200') {
     "range_probe curlExit=$($h.Exit) total=$total"
   }
 }
-"asset=$asset total=$total want=$want api=$code digest=$(if ($want) { 'sha256' } else { 'none' })"
+$api = $code
+}
+"asset=$asset total=$total want=$want api=$api digest=$(if ($want) { 'sha256' } else { 'none' })"
 ```
 
 4. **并行短测各条路线：每条都真跑一次 range GET。** 超时 8s、`--connect-timeout 5`、只取 1MB；B 路线留到第 5 步（内核还没起）。排序先看「拿到 ≥512KB」再看 KBps——镜像回一页 HTML 错误页也会「很快」。
 
 ```powershell
-$u = "https://github.com/$repo/releases/download/$tag/$asset"
-$mirrors = @('https://ghfast.top','https://ghproxy.net','https://gh-proxy.com','https://github.moeyy.xyz','https://gh.llkk.cc','https://ghproxy.cc')
+if (-not $direct) { $u = "https://github.com/$repo/releases/download/$tag/$asset" }
+# 直链模式没有 GitHub 域名可拼镜像，空数组让下面的镜像探测自然跳过
+$mirrors = @()
+if (-not $direct) { $mirrors = @('https://ghfast.top', 'https://ghproxy.net', 'https://gh-proxy.com', 'https://github.moeyy.xyz', 'https://gh.llkk.cc', 'https://ghproxy.cc') }
+# 直链可能就是个小文件，不拿 512KB 卡它
+$minBytes = $(if ($direct) { 1 } else { 524288 })
 $probes = @()
 if ($listen.Count -gt 0) { $probes += [pscustomobject]@{ Name = "A 现有代理 :$($listen[0])"; Url = $u; Proxy = "http://127.0.0.1:$($listen[0])" } }
 $probes += @($mirrors | ForEach-Object { [pscustomobject]@{ Name = "C 镜像 $_"; Url = "$_/$u"; Proxy = $null } })
@@ -226,7 +243,7 @@ $results = @(foreach ($j in $jobs) {
 $results | Sort-Object @{Expression = { $_.Bytes -ge 524288 }; Descending = $true}, @{Expression = 'KBps'; Descending = $true} |
   ForEach-Object { '{0,-30} code={1} bytes={2,9} KBps={3,6} 206={4}' -f $_.Name, $_.Code, $_.Bytes, $_.KBps, ($_.Code -eq '206') }
 "PROBE_206_OK=$(@($results | Where-Object { $_.Code -eq '206' -and $_.Bytes -ge 1048576 }).Count)"
-$cand2 = @($results | Where-Object { $_.Code -in @('200','206') -and $_.Bytes -ge 524288 } | Sort-Object KBps -Descending)
+$cand2 = @($results | Where-Object { $_.Code -in @('200','206') -and $_.Bytes -ge $minBytes } | Sort-Object KBps -Descending)
 if ($cand2.Count -eq 0) {
   throw ("NO_ROUTE: 所有路线都没拿到数据`n" + (($results | ForEach-Object { '{0} code={1} bytes={2} KBps={3}' -f $_.Name, $_.Code, $_.Bytes, $_.KBps }) -join "`n"))
 }
@@ -312,7 +329,7 @@ if ($ForceLadder -or ($bigEnough -and $throttled)) {
   $runs | ForEach-Object { $_.Text }
   "LADDER_DONE: rungs=$($rungs -join '/') passes=3 elapsed=${ladderSec}s sample=$sampleMB MB"
 } else {
-  "SKIP_LADDER: total=$([math]::Round($total/1MB,1))MB singleKB=$singleKB (门槛 ${ladderMinMB}MB / ${fastKB}KB/s) -> 单流，省约 20-26s"
+  "SKIP_LADDER: total=$(if ($total -gt 0) { "$([math]::Round($total/1MB,1))MB" } else { 'unknown' }) singleKB=$singleKB (门槛 ${ladderMinMB}MB / ${fastKB}KB/s) -> 单流，省约 20-26s"
 }
 $agg = @(foreach ($n in $rungs) {
   $s = @($runs | Where-Object { $_.N -eq $n })
@@ -354,13 +371,50 @@ $base = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
 $dir = Join-Path $base '_dl_parts'
 $out = Join-Path $base $asset
 New-Item -ItemType Directory $base -Force | Out-Null
+
+# 0) 孤儿收尾：上次被强杀时留下的 curl 可能还在写同一目录，先清掉，绝不允许两个进程写同一分片
+$orphans = @()
+if ($onWin) {
+  $orphans = @(Get-CimInstance Win32_Process -Filter "Name='curl.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and ($_.CommandLine.Contains($dir) -or $_.CommandLine.Contains($out)) } |
+    ForEach-Object { [int]$_.ProcessId })
+} else {
+  $orphans = @(Get-Process curl -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
+}
+if ($orphans.Count -gt 0) {
+  $orphans | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+  "ORPHANS_KILLED: $($orphans.Count) 个残留 curl 正在写同一目录（pid=$($orphans -join ',')），已停掉再开工"
+}
+
+# 1) 幂等：目标已存在且字节/哈希都对 → 直接跳过（重跑不重复下载）
+$verifiedBefore = $false
+if ((Test-Path $out) -and -not $ForceClean) {
+  $osz = (Get-Item $out).Length
+  if ($total -gt 0 -and $osz -eq $total) {
+    $verifiedBefore = $(if ($want) { (Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash.ToLower() -eq $want } else { $true })
+  }
+  if ($verifiedBefore) { "ALREADY_DONE: $out 已是完整文件（$osz 字节），跳过下载" }
+}
+if ($ForceClean) {
+  Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item $out -Force -ErrorAction SilentlyContinue
+  "FORCE_CLEAN: 已删旧分片与旧输出，强制重下"
+}
+
 if ($Parts -gt 0 -and $winN -gt 1 -and ($total -le 0 -or $total -lt ($ladderMinMB * 1MB))) {
   "PARTS_IGNORED: 资产 $([math]::Round($total/1MB,1))MB（闸值 ${ladderMinMB}MB）或总字节数未知，分段只会更慢，走单流"
   $winN = 1; $parts = 1
 }
 $engine = 'single'; $workers = 0; $segCount = 0; $stolen = 0; $repairs = 0
-if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
-  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $retry
+if ($verifiedBefore) {
+  $engine = 'cached'; $parts = 1
+} elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
+  # 单流也能续：有半截文件且服务器支持 Range 时用 -C - 接着下，而不是从头覆盖
+  $singleResume = @()
+  if ((Test-Path $out) -and $total -gt 0 -and (Get-Item $out).Length -lt $total) {
+    $singleResume = @('-C','-'); "SINGLE_RESUME: 从 $((Get-Item $out).Length) 字节继续"
+  }
+  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $singleResume + $retry
   if ($winProxy) { $a += @('--proxy', $winProxy) }
   $a += $winUrl
   $st = (& $curlExe @a | Out-String).Trim()
@@ -392,8 +446,25 @@ if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
   if ($nseg -gt 64) { $nseg = 64 }
   $chunk = [int64][math]::Ceiling($total / [double]$nseg)
 
-  Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-  New-Item -ItemType Directory $dir -Force | Out-Null
+  # 续传：manifest 记下一次的分段方案（total/chunk/nseg/url）。重跑时方案一致就沿用，已有分片自动跳过
+  $manifest = Join-Path $dir 'manifest.json'
+  $resumePlan = $false
+  if ((Test-Path $manifest) -and -not $ForceClean) {
+    try {
+      $mf = Get-Content $manifest -Raw | ConvertFrom-Json
+      if ([int64]$mf.total -eq $total -and $mf.url -eq $winUrl) {
+        $chunk = [int64]$mf.chunk; $nseg = [int]$mf.nseg; $resumePlan = $true
+        $had = @(Get-ChildItem $dir -Filter 'p*.bin' -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+        "RESUME_PLAN: 沿用上次分段 nseg=$nseg chunk=$([math]::Round($chunk/1MB,1))MB 已有 $([math]::Round($had/1MB,1))MB"
+      }
+    } catch { "RESUME_PLAN_IGNORED: manifest 读不懂（$($_.Exception.Message)），重新规划" }
+  }
+  if (-not $resumePlan) {
+    Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory $dir -Force | Out-Null
+    @{ total = $total; chunk = $chunk; nseg = $nseg; url = $winUrl; asset = $asset } | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifest -Encoding ASCII
+    "PLAN: nseg=$nseg chunk=$([math]::Round($chunk/1MB,1))MB"
+  }
   $pids = New-Object System.Collections.ArrayList
   $swE = [Diagnostics.Stopwatch]::StartNew()
   $segFile = { param($i) Join-Path $dir ("p{0:000}.bin" -f $i) }
@@ -525,58 +596,54 @@ if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
     $engine = 'steal'
   }
 
-  $sum = 0
-  for ($i = 0; $i -lt $nseg; $i++) {
-    $rg = & $rangeOf $i
-    $f = & $segFile $i
-    if (-not (Test-Path $f)) { throw "PART_MISSING: $f" }
-    $len = (Get-Item $f).Length
-    if ($len -ne ($rg.E - $rg.S + 1)) { throw "PART_SIZE: $f len=$len need=$($rg.E - $rg.S + 1)" }
-    $sum += $len
-  }
-  if ($sum -ne $total) { throw "PARTS_MISMATCH: sum=$sum total=$total，先修分片再拼" }
-  $fs = [IO.File]::Create($out)
-  for ($i = 0; $i -lt $nseg; $i++) { $ri = [IO.File]::OpenRead((& $segFile $i)); $ri.CopyTo($fs); $ri.Dispose() }
-  $fs.Dispose()
   $swE.Stop()
   $segCount = $nseg
-  $parts = 1
-  "engine_done=$engine segments=$nseg bytes=$sum steals=$stolen repairs=$repairs elapsed=$([math]::Round($swE.Elapsed.TotalSeconds,1))s"
-  "assembled=$((Get-Item $out).Length)"
+  $parts = $nseg
+  "engine_done=$engine segments=$nseg steals=$stolen repairs=$repairs elapsed=$([math]::Round($swE.Elapsed.TotalSeconds,1))s"
+  "SEGMENTS_READY: $nseg 个分片在 $dir（拼装与逐段核对在第 9 步）"
 }
 ```
 
-8. **分段时 45 秒看一次增长；20–30s 仍 0 字节就自己降档。** 只停自己那批 `$curlPids`，清空分片，降并发（16→8→4）或换第二名路线重开。单流分支跳过本步。
+8. **分段下载的进度快照（不等待）。** P2 引擎自己每 500ms 轮询增长并处理卡段，这一步只留一份可读快照给日志，别再干睡 45 秒拖慢整体。
 
 ```powershell
-if ($parts -gt 1) {
-  $before = (Get-ChildItem $dir -Filter 'p*.bin' | Measure-Object Length -Sum).Sum
-  Start-Sleep -Seconds 45
-  $after = (Get-ChildItem $dir -Filter 'p*.bin' | Measure-Object Length -Sum).Sum
-  "delta=$([math]::Round(($after-$before)/1MB,1))MB/45s = $([math]::Round((($after-$before)/1KB)/45,0)) KB/s total=$([math]::Round($after/1MB,1))MB"
-  Get-ChildItem $dir -Filter 'p*.bin' | Sort-Object Length | ForEach-Object { '{0,-8} {1,12} {2,7:N1} MB' -f $_.Name, $_.Length, ($_.Length / 1MB) }
-  # 判定为 0 时才执行：$curlPids | Stop-Process -Force; 清分片; 改 $parts; 重跑第 7 步
+if ($engine -in @('steal', 'parallel')) {
+  $gotMB = [math]::Round((@(Get-ChildItem $dir -Filter 'p*.bin' -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) / 1MB, 1)
+  "progress=${gotMB}MB/$([math]::Round($total/1MB,1))MB segments=$nseg engine=$engine"
+} else {
+  "progress: engine=$engine 不走分段"
 }
 ```
 
-9. **拼装前逐段核对字节数，再按 p0→pN 拼。** 总和对不上只重跑缺的那段；大小对内容错要靠第 10 步的 digest 发现。
+9. **拼装前逐段强校验，再按 p000→pN 拼。** 每段长度必须精确等于 `end-start+1`；缺段或多出字节都要报 `SEGMENT_SIZE_MISMATCH` 并列出段号/期望/实际，不许边拼边补。
 
 ```powershell
 if ($parts -gt 1) {
-  $sum = (Get-ChildItem $dir -Filter 'p*.bin' | Measure-Object Length -Sum).Sum
-  "partsBytes=$sum total=$total ok=$($sum -eq $total)"
-  Get-ChildItem $dir -Filter 'p*.log' | ForEach-Object { "  $($_.Name): $(((Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) + '').Trim())" }
-  if ($sum -ne $total) { throw "PARTS_MISMATCH: sum=$sum total=$total，先修分片再拼" }
+  if (-not $nseg) { $nseg = $parts }
+  $errs = @(); $sum = 0
+  for ($i = 0; $i -lt $nseg; $i++) {
+    $s = [int64]($i * $chunk)
+    $e = $(if ($i -eq $nseg - 1) { $total - 1 } else { $s + $chunk - 1 })
+    $need = $e - $s + 1
+    $p = Join-Path $dir ("p{0:000}.bin" -f $i)
+    if (-not (Test-Path $p)) { $errs += "p$i 缺失(期望 $need)"; continue }
+    $len = (Get-Item $p).Length
+    if ($len -ne $need) { $errs += ("p{0} 期望 {1} 实际 {2}" -f $i, $need, $len); continue }
+    $sum += $len
+  }
+  if ($errs.Count -gt 0) { throw ("SEGMENT_SIZE_MISMATCH: " + ($errs -join '; ') + "（分片留在 $dir，可直接重跑续传）") }
+  if ($sum -ne $total) { throw "PARTS_MISMATCH: sum=$sum total=$total（分片留在 $dir）" }
+  "partsBytes=$sum total=$total ok=True"
   $fs = [IO.File]::Create($out)
-  for ($i = 0; $i -lt $parts; $i++) {
-    $p = Join-Path $dir "p$i.bin"
-    if (-not (Test-Path $p)) { $fs.Dispose(); throw "PARTS_MISSING: $p" }
-    $in = [IO.File]::OpenRead($p); $in.CopyTo($fs); $in.Dispose()
+  for ($i = 0; $i -lt $nseg; $i++) {
+    $ri = [IO.File]::OpenRead((Join-Path $dir ("p{0:000}.bin" -f $i)))
+    $ri.CopyTo($fs); $ri.Dispose()
   }
   $fs.Dispose()
   "assembled=$((Get-Item $out).Length)"
+  $parts = 1
 } else {
-  "single=$((Get-Item $out).Length)（单流分支，无需拼装）"
+  "single=$((Get-Item $out).Length)（单流/命中缓存，无需拼装）"
 }
 ```
 
@@ -584,15 +651,17 @@ if ($parts -gt 1) {
 
 ```powershell
 $size = (Get-Item $out).Length
-$sizeOk = ($size -eq $total)
-"size=$size expect=$total sizeOk=$sizeOk"
+# total 未知（服务器不给 Content-Range / API 取不到）时，能下完整只能说明「字节数自身一致」，不能说和远端一致
+$sizeOk = $(if ($total -gt 0) { $size -eq $total } else { $size -gt 0 })
+$verifiedOk = $false
+"size=$size expect=$(if ($total -gt 0) { "$total" } else { 'unknown（只能证明下完了，不能证明和远端一致）' }) sizeOk=$sizeOk"
 if ($want) {
   $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash.ToLower()
   "sha256=$got expect=$want"
-  $(if ($sizeOk -and $got -eq $want) { 'DOWNLOAD_VERIFIED_OK' } else { 'DOWNLOAD_VERIFY_FAILED' })
+  if ($sizeOk -and $got -eq $want) { $verifiedOk = $true; 'DOWNLOAD_VERIFIED_OK' } else { 'DOWNLOAD_VERIFY_FAILED' }
 } else {
   'NO_DIGEST: 该 release 未提供 sha256，只能保证字节数一致'
-  $(if ($sizeOk) { 'DOWNLOAD_SIZE_OK_NO_DIGEST' } else { 'DOWNLOAD_VERIFY_FAILED' })
+  if ($sizeOk) { $verifiedOk = $true; 'DOWNLOAD_SIZE_OK_NO_DIGEST' } else { 'DOWNLOAD_VERIFY_FAILED' }
 }
 ```
 
@@ -601,9 +670,10 @@ if ($want) {
 ```powershell
 if ($corePid) { Stop-Process -Id $corePid -ErrorAction SilentlyContinue }
 $curlPids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+if ($verifiedOk -and -not $KeepParts) { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
+elseif (Test-Path $dir) { "PARTS_KEPT: 分片保留在 $dir（校验未通过或 -KeepParts；重跑会续传，-ForceClean 可清掉重下）" }
 Get-ChildItem $env:TEMP -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -like 'ladder_*' -or $_.Name -like 'probe_*' -or $_.Name -like 'meta_*' -or $_.Name -like 'cur_*' -or $_.Name -like 'raw_*' -or $_.Name -like 'ghdl_*' } |
+  Where-Object { $_.Name -like 'ladder_*' -or $_.Name -like 'probe_*' -or $_.Name -like 'meta_*' -or $_.Name -like 'cur_*' -or $_.Name -like 'raw_*' } |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 "7897=$([bool](Test-Port '127.0.0.1' 7897)) corePid=$corePid"
 if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyEnable }
@@ -660,6 +730,11 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 | 一次性 runner `scripts/ghdl.sh`（POSIX） | 部分验证 | 在 Windows Git Bash（MSYS2，sh 5.x）跑通：单流下载 + `PARTS=16` 分段拼装 + SHA256 全对；真实 macOS/Linux、dash/BSD sh **未实测** |
 | 「真零前置」：PATH 只剩系统目录 + 清空 HTTP(S)_PROXY/ALL_PROXY | 已实测（Windows） | 非管理员会话、`PATH=C:\Windows{;\system32;\System32\WindowsPowerShell\v1.0}`，靠端口探测找到 7897，全程 SHA256 校验通过 |
 | frontmatter 最小公共集（只有 name + description） | 已实测 | 严格宿主遇到未知键会整条丢弃技能；触发条件写进 description，`validate.ps1` 只放行这两个键 |
+| P3 任意 https 直链（非 GitHub） | 已实测 | 本机假服务器与真实 https 直链：`direct=True`、`-r 0-0` 从 `Content-Range` 反推 total，只做字节校验 |
+| P3 断点续传 + 幂等 | 已实测 | 真机重跑命中 `ALREADY_DONE`；夹具预置 manifest + 半截分片 → `RESUME_PLAN` 续上、字节精确 |
+| P3 孤儿 curl 收尾 | 已实测 | 先起 `curl --limit-rate 200k` 写同一分片，再跑 runner → `ORPHANS_KILLED: 1 个残留 curl …` 后正常完成 |
+| P3 逐段强校验 + 退出码 | 已实测 | 预置 9,000,000B 超长分片 → `SEGMENT_SIZE_MISMATCH`、exit=1、`PARTS_KEPT`（现场不删） |
+| P3 离线回归测试 | 已实测 | `tests\run-tests.ps1` → `TESTS_OK: 27 项通过`（9 组场景，本机 18765 端口，无外网） |
 
 其它未验证项：macOS 上的 Clash Verge 内核路径、Windows 上超出 6 个镜像的候选、1Gbps 以上链路下的阶梯采样偏差。
 
@@ -690,6 +765,10 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 - **`Get-ChildItem -Filter` 只接受单个字符串**；多模式用 `Where-Object Name -like`。
 - **`skill` 工具报 `unknown or no longer available` 是发现路径问题**：确认技能目录在发现根内（必要时建 junction），再用 `skill` 工具实加载验证，`Test-Path` 为真不算证明。
 - **报告写实测平均速度，不要写峰值**（`speed_download` 瞬时值会被前段缓存拉高）。
+- **收尾清理只删自己建的东西**：别用 `-like 'ghdl_*'` 扫 `%TEMP%`（实测把别人的 `%TEMP%\ghdl_tests` 整个删掉，表现为「下载成功但文件不见了」）；只删 `$dir`/`$out` 与本轮 `ladder_*`/`probe_*`。同理，`Remove-Item $dir` 这类补丁要按行号定位，别用 `-replace` 全文件替换——曾把第 6 步阶梯函数里的 `$dir` 误改。
+- **续传 manifest 必须先校验 `total` 与 `url`**：不合就重建分段方案，否则换了资产会按旧边界拼错；`.resume` 合并前要 `Wait-Process` 再 10×300ms 重试（实测直接 `OpenRead` 会撞「文件被另一进程占用」）。
+- **本机假服务器是单线程的**：`tests/serve.ps1` 串行处理连接，若同时有慢速 curl（比如孤儿收尾那组）占着，探针会全 `000` → `NO_ROUTE`。这是测试夹具限制，不是技能缺陷；跑探针前先确保没有别的慢连接。
+- **直链模式没有 digest**，报告必须写「只校验了字节数」，不许冒充 `DOWNLOAD_VERIFIED_OK`。
 - TODO：宿主已装 aria2c 时可用 `aria2c -x16 -s16 --all-proxy=...` 替代手写分段，本技能未实测该路线，暂不纳入默认流程。
 
 ## Verification
@@ -717,10 +796,12 @@ $code = ([regex]::Matches($t, '(?ms)^[ \t]*```(?:powershell|pwsh|ps1)[ \t]*\r?\n
 - **离线夹具（网络全断时）**：抽出全部围栏块并报「块数与每块起始行号」，零真实流量下全 PASS——32MB 打印 `SKIP_LADDER` 且 `winN=1`、单连接 4200KB/s 同样跳过、99MB→小资产 / 200MB→非小资产；最后 `validate.ps1` exit=0、`%TEMP%` 无 `ladder_*`/`probe_*`/`meta_*`/`raw_*` 残留。夹具 PASS 只能报成离线验证。
 - **收尾**：`7897` 不再监听、`Get-Process verge-mihomo` 无本次残留、`ProxyEnable` 与开始时一致（初始 0）；只按 `$corePid`/`$curlPids` 以 Id 停进程。
 - **加载证明**：`skill` 工具能真正加载 `github-release-download-acceleration`（返回技能名/正文），不是只看目录存在；本技能只做本地验证，不 `git init`、不 push。
+- **P3 四条断言的输出形态**：直链走 `direct=True`；重跑命中 `ALREADY_DONE` 或 `RESUME_PLAN`；收尾有 `ORPHANS_KILLED`；逐段不符必须 `SEGMENT_SIZE_MISMATCH` + 退出码 1 + `PARTS_KEPT`（且**不能**打印 `DOWNLOAD_VERIFIED_OK`）。
+- **离线回归**：`powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1` 必须 `TESTS_OK: 27 项通过`（9 组场景：单流/幂等/`-ForceClean`/16 段/续传/坏分片/短包/无 Range/全灭）。
 
 ## 维护与自检（改完必跑）
 
-三个非模型文件随文档同步维护：`agents/openai.yaml`（`short_description` 25–64 字符、`default_prompt` 含 `$github-release-download-acceleration`）、`README.md`（能力/限制/示例/支持矩阵与本文一致）、`scripts/validate.ps1`（可复跑自检，退出码非 0 就是文档有问题）。
+三个非模型文件随文档同步维护：`agents/openai.yaml`（`short_description` 25–64 字符、`default_prompt` 含 `$github-release-download-acceleration`）、`README.md`（能力/限制/示例/支持矩阵与本文一致）、`scripts/validate.ps1`（可复跑自检，退出码非 0 就是文档有问题）。改动第 0–11 步的代码后，`scripts/ghdl.ps1` 由 `scripts/build-runner.ps1` 重新生成，`validate.ps1` 会比对同步性；`tests/` 是离线回归套件，改代码后同样要重跑。
 
 两个门槛的唯一改动点是正文「可调参数」表；PS 5.1 没有 YAML 解析器，代码里各存一份，**改阈值要两处同步**，只改一边直接 FAIL。
 

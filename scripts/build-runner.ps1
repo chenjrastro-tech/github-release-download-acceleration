@@ -7,8 +7,9 @@
   同一批代码块拼出来，改 SKILL.md 后重跑本脚本即可。
   生成时会替换 3 处只有交互式执行才需要的东西：
     1. 第 0 块的示例 URL → 改成 -Url 参数
-    2. 第 7 块的 $ForceLadder = $false → 改成 -ForceLadder 开关
-    3. 第 8 块的 ~/Downloads → 改成 -OutDir 参数
+    2. 第 6 块的 $ForceLadder = $false → 改成 -ForceLadder 开关
+    3. 第 7 块的 ~/Downloads → 改成 -OutDir 参数
+  其余开关（-ForceClean / -KeepParts / -Parts）由下面的 head 模板直接注入，正文块按变量名读取。
 
   用法：
     powershell -NoProfile -File scripts\build-runner.ps1            # 生成/覆盖
@@ -61,7 +62,10 @@ $head = @"
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 页地址>' -OutDir 'D:\Downloads'
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -ForceLadder     # 强制做单流 vs 多段对照
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -Parts 16          # 手动指定并发段数（诊断/复现用）
+    powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -ForceClean        # 删旧分片/旧输出，强制重下
+    powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -KeepParts         # 校验通过也保留分片（排查用）
 
+  幂等：目标已存在且字节/SHA256 都对 → 直接 ALREADY_DONE 跳过；中断后重跑 → 按 manifest 沿用分段续传。
   退出码：0=成功；1=流程内失败（看输出里的 CODE: 前缀）；2=参数错误
   输出约定：关键结论行以 DOWNLOAD_ / NO_ROUTE / ASSET_ / SKIP_LADDER / route= / parts= 开头，便于 agent 解析。
 #>
@@ -70,6 +74,8 @@ param(
   [Parameter(Mandatory = `$true, Position = 0)][string]`$Url,
   [string]`$OutDir = (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'),
   [switch]`$ForceLadder,
+  [switch]`$ForceClean,
+  [switch]`$KeepParts,
   [int]`$Parts = 0
 )
 
@@ -79,8 +85,15 @@ param(
 
 "@
 
+$tail = @"
+
+# ---- 退出码：给调用方（agent / CI）判断成败用，不要靠读文字猜
+# 第 10 步算出的 `$verifiedOk：digest 或字节数校验通过才是真
+if (`$verifiedOk) { exit 0 } else { exit 1 }
+"@
+
 $body = ($flow -join "`n")
-$text = ($head -replace "`r`n", "`n") + $body.TrimEnd() + "`n"
+$text = ($head -replace "`r`n", "`n") + $body.TrimEnd() + "`n" + ($tail -replace "`r`n", "`n")
 $text = $text -replace "`n", "`r`n"
 
 if ($Check) {

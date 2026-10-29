@@ -288,6 +288,15 @@ if (Test-Path -LiteralPath $runnerSh) {
   if ($shText -match 'set -[eu]') { Ok "ghdl.sh 设置了 set -e/-u" } else { Warn "ghdl.sh 建议加 set -eu" }
 } else { Warn "没有 scripts/ghdl.sh（macOS/Linux 路径）" }
 
+$testsRunner = Join-Path $SkillRoot 'tests\run-tests.ps1'
+$testsServer = Join-Path $SkillRoot 'tests\serve.ps1'
+if ((Test-Path -LiteralPath $testsRunner) -and (Test-Path -LiteralPath $testsServer)) {
+  Ok "离线回归测试存在（tests\run-tests.ps1 + tests\serve.ps1）"
+  $tErr = $null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($testsRunner, [ref]$null, [ref]$tErr)
+  if ($tErr -and $tErr.Count -gt 0) { Bad "tests\run-tests.ps1 语法错误 $($tErr.Count) 处" } else { Ok "tests\run-tests.ps1 语法解析通过" }
+} else { Warn "没有 tests\run-tests.ps1（离线回归测试缺失）" }
+
 Write-Host ("-" * 72)
 if ($script:fail -gt 0) {
   Write-Host "VALIDATE_FAILED: $($script:fail) 个错误 / $($script:warn) 个告警" -ForegroundColor Red

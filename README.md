@@ -117,7 +117,20 @@ powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>'
 powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -OutDir 'D:\Downloads'
 powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -ForceLadder   # 强制单流 vs 多段对照
 powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -Parts 16      # 手动指定并发段数
+powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -ForceClean    # 删旧分片/旧输出，强制重下
+powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -KeepParts     # 校验通过也保留分片（排查用）
+
+# 任意直链也能用（自建 CDN / GitLab / 内网制品库），只做字节数校验
+powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://example.com/big.bin'
 ```
+
+行为约定（agent 可以直接依赖）：
+
+- **幂等**：目标文件已存在且字节数（有 digest 时再加 SHA256）都对 → `ALREADY_DONE` 直接跳过，不重下。
+- **可续传**：分段方案写在 `_dl_parts/manifest.json`；中断后重跑，`RESUME_PLAN` 沿用上次分段，已下分片跳过。
+- **不留双写**：上次被强杀留下的 curl 还在写同一目录时，先 `ORPHANS_KILLED` 清掉再开工。
+- **退出码**：`0` 只有在校验通过时才返回；`DOWNLOAD_VERIFY_FAILED` / `SEGMENT_SIZE_MISMATCH` / `NO_ROUTE` 都是 `1`。
+- **失败保留现场**：校验没过时分片不删（`PARTS_KEPT`），下次接着下；确认不要了再加 `-ForceClean`。
 
 ```sh
 # macOS / Linux：脚本已就绪但在真实 mac/Linux 上未实测（只在 Windows Git Bash 跑通，见「支持矩阵」）
@@ -251,6 +264,20 @@ metadata:
 | 强制阶梯 | 同上 | 6 次采样（1/16 各三遍）、2 行汇总、无 4 段档、`winN=1`，耗时 26.1 s |
 | 错误路径 | 不存在的 asset；`digest: null` 的老 release | `ASSET_NOT_FOUND` + 候选清单；`NO_DIGEST` + `DOWNLOAD_SIZE_OK_NO_DIGEST` |
 
+### 本地回归测试（P3，离线、确定性）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+# TESTS_OK: 27 项通过
+```
+
+`tests/serve.ps1` 用 `TcpListener` 在本机起一个假 Release 服务（支持 Range，也能模拟「只发 700KB 就断」和「根本不支持 Range」），
+`tests/run-tests.ps1` 跑 9 组场景 27 条断言：单流、幂等重跑、`-ForceClean`、16 段分段（123,456,789 B，非段长整数倍）、
+续传（预置 manifest + 半个分片）、坏分片（长度不符）、短包、无 Range 服务器、全灭路线。
+不需要外网、不需要 GitHub 账号、不需要装任何东西；跑完自动清 `%TEMP%\ghdl_tests`（加 `-Keep` 保留现场）。
+
+**不覆盖**：digest 不匹配（要真 release）、`ASSET_NOT_FOUND`（要 GitHub API）、磁盘不足（要真满盘）——这三条只能真实环境验。
+
 ## 截图
 
 节点把单连接限速时的对照（213.4 MB：177.0 s → 28.2 s）：
@@ -275,6 +302,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
 ## 变更记录
+
+**0.4.0（2026-10-30）**：P3——①任意直链（不再只认 `github.com/.../releases/download/...`，自建 CDN/GitLab/内网制品库也能用，只做字节校验）；②断点续传 + 幂等（`_dl_parts/manifest.json` 记分段方案，重跑沿用并跳过已下分片；成品已完整则 `ALREADY_DONE`）；③孤儿进程收尾（上次被强杀留下的 curl 先 `ORPHANS_KILLED` 再开工，杜绝双写同一分片）；④逐段强校验（`p000..pN` 每段长度必须等于 `end-start+1`，否则 `SEGMENT_SIZE_MISMATCH` 并保留现场）；⑤退出码语义（只有校验通过才是 0）；⑥`-ForceClean` / `-KeepParts`；⑦离线回归测试 `tests/run-tests.ps1`（9 组场景 27 条断言，本机 18765 端口，不需要外网）。
 
 **0.3.0（2026-10-30）**：P2 并发引擎——自适应段大小（按单连接实测速度）、多源路线池（只收 ≥35% 最快速度的前三条）、工作窃取（卡住就杀掉续传换路线）、自适应并发（4 起步，涨 15% 加 2、卡 2 段砍半）、`curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`）。同机实测：单流 31.2s / 自适应 32.3s / `--parallel` 31.6s / 杀段恢复 30.7s，全部字节精确。
 
