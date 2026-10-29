@@ -107,6 +107,27 @@ https://github.com/junegunn/fzf/releases/download/v0.65.2/fzf-0.65.2-windows-x64
 
 内部执行顺序固定为：`解析 URL → 环境自检 → 定位内核与配置 → API 校验资产名 → 并行探测路线 →（必要时）无头起内核 → 按需阶梯（<100MB 或单连接已够快则跳过）→ 下载 → 监控/降档 → 拼装 → digest 校验 → 收尾`。
 
+### 一次性 runner（宿主只能执行一条命令时）
+
+有些宿主只肯跑一次本地命令，没有「逐块读文档再执行」的能力。这种场景用 runner，一条命令走完全流程：
+
+```powershell
+# Windows：PowerShell 5.1 与系统 curl 都自带，不需要装任何东西
+powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>'
+powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -OutDir 'D:\Downloads'
+powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -ForceLadder   # 强制单流 vs 多段对照
+powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -Parts 16      # 手动指定并发段数
+```
+
+```sh
+# macOS / Linux：未验证（只过了 sh -n 语法检查，见「支持矩阵」）
+sh scripts/ghdl.sh '<release 直链>'
+```
+
+`scripts/ghdl.ps1` 不是手写的：`scripts/build-runner.ps1` 把 `SKILL.md` 第 0–11 步的代码块拼成它（只替换 URL/输出目录/强制阶梯三处），`validate.ps1` 会比对两者，改了文档不重生成就 FAIL。
+
+**「真零前置」的可验证定义**：PATH 只留系统目录、清空 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`、不登录任何账号、非管理员用户，仍能完成一次真实下载并通过校验。Windows 侧已按这个口径实测通过——非管理员会话、PATH 只剩 `C:\Windows{,\system32,\System32\WindowsPowerShell\v1.0}`，靠端口探测找到本机 7897，最后 SHA256 与 release digest 一致。
+
 ## 5. 输入输出示例
 
 **输入**：一个 GitHub release 直链或 tag 页；可选目标目录。

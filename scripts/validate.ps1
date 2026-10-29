@@ -10,12 +10,14 @@
     1. 必需文件：SKILL.md / README.md / agents/openai.yaml
     2. SKILL.md frontmatter：首尾 ---、必填 name+description、name 与目录名一致且为 kebab-case、
        未知字段告警、description 长度合理
-    2b. frontmatter.metadata 里的两个门槛（min_size_for_ladder_mb / single_conn_fast_kbps）
+    2b. 正文「可调参数」表里的两个门槛（min_size_for_ladder_mb / single_conn_fast_kbps）
        必须与正文代码里的 $ladderMinMB / $fastKB 一致
     3. 正文结构：Steps / Pitfalls / Verification 三节齐备
     4. 所有 ```powershell 代码块能被 PowerShell 解析器无错解析
     5. 5.1 兼容性红线：-Parallel / -ThrottleLimit / 含空格的 -w 参数
     6. agents/openai.yaml：interface 三要素齐备、default_prompt 用 $技能名 引用自己、字符串加引号
+    7. 插件包装：package.json / cordis.patch.yml / index.js 三者 id/name 一致
+    8. 一次性 runner（scripts/ghdl.ps1 / ghdl.sh）存在、可解析、且与 SKILL.md 同步
 
   退出码：0 = 全部通过（允许 WARN），1 = 有 FAIL
 #>
@@ -72,7 +74,7 @@ else {
     Bad "frontmatter 没有闭合的 ---"
   }
   else {
-    $allowed = @('name', 'description', 'whenToUse', 'metadata', 'disable-model-invocation', 'user-invocable')
+    $allowed = @('name', 'description')
     $fm = @{}
     $meta = @{}
     for ($i = 1; $i -lt $end; $i++) {
@@ -108,23 +110,24 @@ else {
     foreach ($k in $fm.Keys) {
       if ($k -notin $allowed) { Warn "frontmatter 有本宿主不认识的字段：$k（DSH 只认 $($allowed -join ', ')）" }
     }
-    if ($fm.ContainsKey('whenToUse')) { Ok "whenToUse 已提供（$($fm['whenToUse'].Length) 字符）" }
-    else { Warn "没有 whenToUse，模型路由只能靠 description" }
+    # frontmatter 只留 name + description（最小公共集）：严格宿主遇到不认识的键会整条丢弃技能，
+    # 因此触发条件必须写进 description / 正文，而不是 whenToUse。
 
-    # ---------- 2b. metadata 阈值 与 正文代码里的默认值一致 ----------
-    # 5.1 没有 YAML 解析器，代码不可能直接读 frontmatter，所以两处各存一份，这里负责比对。
+    # ---------- 2b. 正文参数表 与 代码默认值一致 ----------
+    # 阈值以正文「可调参数」表为文档侧真源，第 6 步代码里各有一份常量，两处必须同步。
     $thresholdVars = [ordered]@{ 'min_size_for_ladder_mb' = 'ladderMinMB'; 'single_conn_fast_kbps' = 'fastKB' }
     foreach ($mk in $thresholdVars.Keys) {
       $var = $thresholdVars[$mk]
-      if (-not $meta.ContainsKey($mk)) { Bad "frontmatter.metadata 缺少 $mk"; continue }
-      if ($meta[$mk] -notmatch '^\d+$') { Bad "metadata.$mk 必须是纯数字（建议加引号写成字符串），当前 '$($meta[$mk])'"; continue }
-      Ok "metadata.$mk = $($meta[$mk])"
+      $rowM = [regex]::Match($skillText, ('(?m)^\|\s*`' + $mk + '`\s*\|\s*(?<v>\d+)\s*\|'))
+      if (-not $rowM.Success) { Bad "正文「可调参数」表缺少 $mk 行"; continue }
+      $declared = [int]$rowM.Groups['v'].Value
+      Ok "参数表 $mk = $declared"
       $hit = [regex]::Match($skillText, ('\$' + $var + '\s*=\s*(?<n>\d+)'))
       if (-not $hit.Success) { Bad "正文里找不到 `$$var = <数字>`，第 6/7 步的两个门槛变量必须保留这一行" }
-      elseif ([int]$hit.Groups['n'].Value -ne [int]$meta[$mk]) {
-        Bad "metadata.$mk=$($meta[$mk]) 与代码 `$$var = $($hit.Groups['n'].Value)` 不一致：改阈值要两处同步"
+      elseif ([int]$hit.Groups['n'].Value -ne $declared) {
+        Bad "参数表 $mk=$declared 与代码 `$$var = $($hit.Groups['n'].Value)` 不一致：改阈值要两处同步"
       }
-      else { Ok "`$$var 与 metadata.$mk 一致" }
+      else { Ok "`$$var 与参数表 $mk 一致" }
     }
   }
 }
@@ -261,6 +264,29 @@ if (Test-Path -LiteralPath $patchPath) {
 } elseif ($pkg) {
   Bad "声明了 dsh.bundle 但缺少 cordis.patch.yml"
 }
+
+# ---------- 8. 一次性 runner ----------
+$runnerPs1 = Join-Path $SkillRoot 'scripts\ghdl.ps1'
+if (-not (Test-Path -LiteralPath $runnerPs1)) {
+  Warn "没有 scripts/ghdl.ps1（一次性 runner 未生成，跑 scripts\build-runner.ps1）"
+} else {
+  $rErr = $null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($runnerPs1, [ref]$null, [ref]$rErr)
+  if ($rErr -and $rErr.Count -gt 0) { Bad "ghdl.ps1 语法错误 $($rErr.Count) 处" }
+  else { Ok "ghdl.ps1 语法解析通过（$((Get-Item $runnerPs1).Length) 字节）" }
+  $builder = Join-Path $SkillRoot 'scripts\build-runner.ps1'
+  if (Test-Path -LiteralPath $builder) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $builder -Check | Out-Null
+    if ($LASTEXITCODE -eq 0) { Ok "ghdl.ps1 与 SKILL.md 同步（build-runner -Check）" }
+    else { Bad "ghdl.ps1 与 SKILL.md 不同步：重跑 scripts\build-runner.ps1" }
+  } else { Warn "没有 scripts/build-runner.ps1，无法校验 runner 漂移" }
+}
+$runnerSh = Join-Path $SkillRoot 'scripts\ghdl.sh'
+if (Test-Path -LiteralPath $runnerSh) {
+  $shText = Read-Utf8 $runnerSh
+  if ($shText -notmatch "`r") { Ok "ghdl.sh 是 LF 换行" } else { Bad "ghdl.sh 含 CRLF，POSIX 下会报 bad interpreter" }
+  if ($shText -match 'set -[eu]') { Ok "ghdl.sh 设置了 set -e/-u" } else { Warn "ghdl.sh 建议加 set -eu" }
+} else { Warn "没有 scripts/ghdl.sh（macOS/Linux 路径）" }
 
 Write-Host ("-" * 72)
 if ($script:fail -gt 0) {
