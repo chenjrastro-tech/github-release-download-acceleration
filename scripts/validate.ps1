@@ -198,6 +198,65 @@ if (Test-Path -LiteralPath $oaPath) {
   else { Warn "default_prompt 未用 `$技能名 形式引用自己" }
 }
 
+# ---------- 7. 插件包装（package.json / cordis.patch.yml / index.js） ----------
+# 市场 CI 会读这三样：`dsh.bundle.patch` 必须指向真实文件，patch 里的 `id`/`name` 必须与
+# package.json 的 `name` 和 index.js 的 `export const name` 一致，否则开机解析失败。
+$pkgPath = Join-Path $SkillRoot 'package.json'
+$patchPath = Join-Path $SkillRoot 'cordis.patch.yml'
+$indexPath = Join-Path $SkillRoot 'index.js'
+$dirName = Split-Path -Leaf ($SkillRoot.TrimEnd('\'))
+
+if (-not (Test-Path -LiteralPath $pkgPath)) {
+  Warn "没有 package.json：手动放技能的用法仍可用，但进不了插件市场"
+} else {
+  $pkgText = Read-Utf8 $pkgPath
+  $pkg = $null
+  try { $pkg = $pkgText | ConvertFrom-Json } catch { Bad "package.json 不是合法 JSON：$($_.Exception.Message)" }
+  if ($pkg) {
+    if ($pkg.name -eq $dirName) { Ok "package.json name 与目录名一致（$($pkg.name)）" }
+    else { Bad "package.json name=$($pkg.name) 与目录名 $dirName 不一致" }
+    if ($pkg.name -match '^[a-z0-9]+(?:-[a-z0-9]+)*$') { Ok "package.json name 是 kebab-case" }
+    else { Bad "package.json name 不是 kebab-case：$($pkg.name)" }
+    if ($pkg.version -match '^\d+\.\d+\.\d+') { Ok "package.json version = $($pkg.version)" }
+    else { Bad "package.json version 不是 semver：$($pkg.version)" }
+    if ($pkg.dsh.bundle.patch) { Ok "package.json 声明了 dsh.bundle.patch = $($pkg.dsh.bundle.patch)" }
+    else { Bad "package.json 缺少 dsh.bundle.patch（市场只收声明了 dsh.bundle 的包）" }
+    if ($pkg.main -and (Test-Path -LiteralPath (Join-Path $SkillRoot $pkg.main))) { Ok "package.json main 指向存在的文件（$($pkg.main)）" }
+    else { Bad "package.json main 缺失或指向不存在的文件" }
+
+    if ($pkg.dsh.bundle.patch) {
+      $patched = Join-Path $SkillRoot $pkg.dsh.bundle.patch
+      if (Test-Path -LiteralPath $patched) { Ok "bundle patch 文件存在" }
+      else { Bad "dsh.bundle.patch 指向的 $($pkg.dsh.bundle.patch) 不存在" }
+    }
+  }
+}
+
+if (Test-Path -LiteralPath $patchPath) {
+  $patch = Read-Utf8 $patchPath
+  if ($patch -match '(?m)^- insert:') { Ok "cordis.patch.yml 有 insert 段" } else { Bad "cordis.patch.yml 缺少 insert 段" }
+  # YAML 里 `- id: x` 与 `  id: x` 两种写法都合法，正则要同时吃下前导列表符号。
+  $idM = [regex]::Match($patch, '(?m)^\s*(?:-\s+)?id:\s*(?<v>[^\s#]+)')
+  $nameM = [regex]::Match($patch, '(?m)^\s*(?:-\s+)?name:\s*[''"]?(?<v>[^''"\r\n]+)')
+  if (-not $idM.Success) { Bad "cordis.patch.yml 缺少 id" }
+  if (-not $nameM.Success) { Bad "cordis.patch.yml 缺少 name" }
+  if ($idM.Success -and $nameM.Success -and $pkg) {
+    if ($nameM.Groups['v'].Value.Trim() -eq $pkg.name) { Ok "patch name 与 package.json name 一致" }
+    else { Bad "patch name=$($nameM.Groups['v'].Value.Trim()) 与 package.json name=$($pkg.name) 不一致" }
+    $idxText = if (Test-Path -LiteralPath $indexPath) { Read-Utf8 $indexPath } else { '' }
+    $expM = [regex]::Match($idxText, "export\s+const\s+name\s*=\s*['""](?<v>[^'""]+)['""]")
+    if (-not $expM.Success) { Bad "index.js 缺少 export const name" }
+    elseif ($expM.Groups['v'].Value -eq $idM.Groups['v'].Value) { Ok "patch id 与 index.js 的 export const name 一致" }
+    else { Bad "patch id=$($idM.Groups['v'].Value) 与 index.js name=$($expM.Groups['v'].Value) 不一致" }
+    if ($idxText -match "inject\s*=\s*\[[^\]]*'skills'") { Ok "index.js 声明 inject = ['skills']" }
+    else { Bad "index.js 没有声明 inject = ['skills']" }
+    if ($idxText -match 'registerProvider\(') { Ok "index.js 调用了 ctx.skills.registerProvider" }
+    else { Bad "index.js 没有调用 registerProvider" }
+  }
+} elseif ($pkg) {
+  Bad "声明了 dsh.bundle 但缺少 cordis.patch.yml"
+}
+
 Write-Host ("-" * 72)
 if ($script:fail -gt 0) {
   Write-Host "VALIDATE_FAILED: $($script:fail) 个错误 / $($script:warn) 个告警" -ForegroundColor Red

@@ -1,0 +1,55 @@
+{
+  "name": "github-release-download-acceleration",
+  "version": "0.2.0",
+  "description": "DSH skill that measures which route to a GitHub release asset is fastest (existing proxy, headless Clash core, public mirrors, direct), runs a time-boxed concurrency ladder on the winner, then downloads in parallel curl ranges and verifies size plus SHA256 against the release digest. No aria2, no system proxy changes, no questions.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "skill",
+    "github",
+    "release",
+    "download",
+    "accelerate",
+    "proxy",
+    "mirror",
+    "curl",
+    "range",
+    "windows",
+    "powershell"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "cordis.patch.yml",
+    "agents",
+    "scripts"
+  ],
+  "license": "MIT",
+  "author": "Duktig.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chenjrastro-tech/github-release-download-acceleration.git"
+  },
+  "homepage": "https://github.com/chenjrastro-tech/github-release-download-acceleration#readme",
+  "bugs": {
+    "url": "https://github.com/chenjrastro-tech/github-release-download-acceleration/issues"
+  }
+}
