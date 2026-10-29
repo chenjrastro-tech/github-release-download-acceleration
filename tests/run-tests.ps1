@@ -5,13 +5,15 @@
   跑法：
     powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
     powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Keep   # 保留临时目录排查
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Port 19000  # 指定端口
 
   覆盖：单流 / 幂等 / 强制重下 / 16 段分段 / 续传（manifest）/ 坏分片 / 短包 / 不支持 Range / 全灭路线
+        直链 404 / 死代理端口 / -Parts 64 并发夹取（共 12 组 34 条）
   不覆盖（需要真实网络或真实磁盘故障）：digest 不匹配、ASSET_NOT_FOUND、磁盘不足、镜像超时
 #>
 [CmdletBinding()]
 param(
-  [int]$Port = 18765,
+  [int]$Port = 0,   # 0 = 自动挑一个空闲端口，避免和上一次残留的 serve.ps1 撞车
   [switch]$Keep
 )
 
@@ -20,9 +22,16 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Runner = Join-Path $Root 'scripts\ghdl.ps1'
 $Server = Join-Path $Root 'tests\serve.ps1'
 $Work = Join-Path $env:TEMP 'ghdl_tests'
-$Base = "http://127.0.0.1:$Port"
 
 if (-not (Test-Path $Runner)) { throw "缺少 runner：$Runner" }
+
+if ($Port -eq 0) {
+  $probe = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+  $probe.Start()
+  $Port = ([System.Net.IPEndPoint]$probe.LocalEndpoint).Port
+  $probe.Stop()
+}
+$Base = "http://127.0.0.1:$Port"
 
 $script:Pass = 0
 $script:Fail = 0
@@ -70,6 +79,22 @@ if (-not (Test-Port $Port)) {
   $n = 0
   while (-not (Test-Port $Port) -and $n -lt 50) { Start-Sleep -Milliseconds 200; $n++ }
   if (-not (Test-Port $Port)) { throw "本地测试服务器起不来（端口 $Port）" }
+}
+
+# 端口活着不等于「活的是本测试的 serve.ps1」：旧实例/别的服务占着同一端口会让用例莫名其妙地 404。
+# 用一个 1 字节 range 请求验明正身（serve.ps1 对 /ok.bin 应回 206）。
+function Test-Serve {
+  try {
+    $req = [System.Net.HttpWebRequest]::Create("$Base/ok.bin")
+    $req.Method = 'GET'; [void]$req.AddRange(0, 0); $req.Timeout = 5000
+    $resp = $req.GetResponse()
+    $code = [int]$resp.StatusCode
+    $resp.Close()
+    return ($code -eq 206)
+  } catch { return $false }
+}
+if (-not (Test-Serve)) {
+  throw "端口 $Port 上监听的不是本测试的 serve.ps1（可能是上一次残留的旧实例）——先结束它，或换 -Port 重跑"
 }
 
 try {
@@ -188,7 +213,8 @@ try {
   "`n[12] 并发过大（-Parts 64）"
   $d12 = Join-Path $Work 'toomany'
   $r = Invoke-Ghdl @('-Url', "$Base/big.bin", '-OutDir', $d12, '-Parts', '64')
-  Check ($r.Code -eq 0) '-Parts 64 仍能完成 exit=0' "exit=$($r.Code)"
+  $tail12 = (($r.Out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 6) -join ' / ')
+  Check ($r.Code -eq 0) '-Parts 64 仍能完成 exit=0' "exit=$($r.Code) tail=$tail12"
   $m = [regex]::Match($r.Out, 'workers=start(\d+)/(\d+)')
   Check ($m.Success -and [int]$m.Groups[1].Value -le 16 -and [int]$m.Groups[2].Value -le 16) '并发被夹到 ≤16' "workers=$($m.Groups[0].Value)"
   Check ((Get-Item (Join-Path $d12 'big.bin')).Length -eq 123456789) '字节仍精确'
