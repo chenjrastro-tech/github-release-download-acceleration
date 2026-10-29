@@ -11,6 +11,7 @@
     /nodash.bin    4 MB，Support Range
     /short.bin     声明 2 MB，实际只发 700 KB 就断开（模拟「短包」）
     /norange.bin   1 MB，故意忽略 Range（永远 200 + 全量），模拟不支持分段的服务器
+    /huge.bin      1,880,743,936 B（1.75GB，非 2 的幂），给「≥1GB 段粒度」手动验收用，不参与 run-tests
 #>
 [CmdletBinding()]
 param(
@@ -29,6 +30,7 @@ $specs = @{
   '/nodash.bin'  = @{ Total = 4194304;   Mode = 'ok' }
   '/short.bin'   = @{ Total = 2097152;   Mode = 'short'; Send = 716800 }
   '/norange.bin' = @{ Total = 1048576;   Mode = 'norange' }
+  '/huge.bin'    = @{ Total = 1880743936; Mode = 'ok' }
 }
 
 $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)

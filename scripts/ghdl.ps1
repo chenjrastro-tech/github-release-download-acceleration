@@ -369,14 +369,16 @@ if ($verifiedBefore) {
   if ($pool.Count -eq 0) { $pool = @($route) }
   $poolNames = ($pool | ForEach-Object { $_.Name }) -join ' + '
 
-  # 自适应段大小：按单连接实测速度让每段约 4 秒的活，夹在 2MB..24MB，段数 1..64
+  # 自适应段大小：按单连接实测速度让每段约 4 秒的活，夹在 2MB..24MB。
+  # 段数上限取 128：总长 ≤3GB 时段大小都不会被顶出 24MB（1GB 约 52–78 段，3GB 约 128 段）；
+  # 超过 3GB 才会出现 >24MB 的段——宁可段变大，也不让分片数量失控。
   $perKB = [math]::Max([int]$singleKB, 512)
   $chunk = [int64]($perKB * 1024 * 4)
   if ($chunk -lt 2MB) { $chunk = 2MB } elseif ($chunk -gt 24MB) { $chunk = 24MB }
   $workers = [math]::Min([math]::Max([int]$parts, 2), 16)
   $nseg = [int][math]::Ceiling($total / [double]$chunk)
   if ($nseg -lt $workers) { $nseg = $workers }
-  if ($nseg -gt 64) { $nseg = 64 }
+  if ($nseg -gt 128) { $nseg = 128 }
   $chunk = [int64][math]::Ceiling($total / [double]$nseg)
 
   # 续传：manifest 记下一次的分段方案（total/chunk/nseg/url）。重跑时方案一致就沿用，已有分片自动跳过

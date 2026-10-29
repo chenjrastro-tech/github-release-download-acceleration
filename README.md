@@ -158,7 +158,7 @@ sh scripts/ghdl.sh '<release 直链>'
 
 结论：节点不限速时并发不会更快，引擎会自己退回单流；只有单连接被限速时才有收益（历史实测 6.3×）。
 
-**≥1GB 资产实测**（Godot 4.7.2 mono export templates，1,202,598,411 B，`-Parts 8`）：`PLAN: nseg=64 chunk=17.9MB`（段数夹到 64、段大小夹在 2–24MB），64 段 `steals=6 repairs=6`，引擎 168.7s、总耗时 189.3s，SHA256 与 release digest 一致 → `DOWNLOAD_VERIFIED_OK`。
+**≥1GB 资产实测**（Godot 4.7.2 mono export templates，1,202,598,411 B）：不带 `-Parts` 时按闸值直接单流（176.9s，SHA256 与 digest 一致）；`-Parts 8` 时 `PLAN: nseg=49 chunk=23.4MB`，49 段 `steals=27 repairs=27`，同样校验通过。段数上限是 128（不是 64）：本地 1.75GB 用例 `-Parts 4` 跑出 `nseg=75`，证明段数超过 64 时引擎仍正常（10.8s、字节精确）。
 
 **「真零前置」的可验证定义**：PATH 只留系统目录、清空 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`、不登录任何账号、非管理员用户，仍能完成一次真实下载并通过校验。Windows 侧已按这个口径实测通过——非管理员会话、PATH 只剩 `C:\Windows{,\system32,\System32\WindowsPowerShell\v1.0}`，靠端口探测找到本机 7897，最后 SHA256 与 release digest 一致。
 

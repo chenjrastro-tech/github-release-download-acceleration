@@ -447,14 +447,16 @@ if ($verifiedBefore) {
   if ($pool.Count -eq 0) { $pool = @($route) }
   $poolNames = ($pool | ForEach-Object { $_.Name }) -join ' + '
 
-  # 自适应段大小：按单连接实测速度让每段约 4 秒的活，夹在 2MB..24MB，段数 1..64
+  # 自适应段大小：按单连接实测速度让每段约 4 秒的活，夹在 2MB..24MB。
+  # 段数上限取 128：总长 ≤3GB 时段大小都不会被顶出 24MB（1GB 约 52–78 段，3GB 约 128 段）；
+  # 超过 3GB 才会出现 >24MB 的段——宁可段变大，也不让分片数量失控。
   $perKB = [math]::Max([int]$singleKB, 512)
   $chunk = [int64]($perKB * 1024 * 4)
   if ($chunk -lt 2MB) { $chunk = 2MB } elseif ($chunk -gt 24MB) { $chunk = 24MB }
   $workers = [math]::Min([math]::Max([int]$parts, 2), 16)
   $nseg = [int][math]::Ceiling($total / [double]$chunk)
   if ($nseg -lt $workers) { $nseg = $workers }
-  if ($nseg -gt 64) { $nseg = 64 }
+  if ($nseg -gt 128) { $nseg = 128 }
   $chunk = [int64][math]::Ceiling($total / [double]$nseg)
 
   # 续传：manifest 记下一次的分段方案（total/chunk/nseg/url）。重跑时方案一致就沿用，已有分片自动跳过
@@ -734,7 +736,7 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 | 有代理时自动复用 | 已实测 | A 路线 range 实测后被选为胜出路线 |
 | 管理员权限 | 不需要 | 只读 HKCU，不改注册表/系统代理 |
 | Python / Node / aria2 / 7z / wget | 不需要 | 只用系统 curl + PowerShell/sha256 工具 |
-| ≥1GB 资产的段粒度自适应 | 已实测 | Godot 4.7.2 mono export templates 1,202,598,411 B，`-Parts 8` → `PLAN: nseg=64 chunk=17.9MB`（nseg 夹到 64、chunk 夹在 2–24MB），64 段 `steals=6 repairs=6`，168.7s，SHA256 与 digest 一致 |
+| ≥1GB 资产的段粒度自适应 | 已实测 | ①真实资产 Godot 4.7.2 mono export templates 1,202,598,411 B：不带 `-Parts` 时 `SKIP_LADDER` → 单流 176.9s，SHA256 与 digest 一致；`-Parts 8` → `PLAN: nseg=49 chunk=23.4MB`、49 段 `steals=27 repairs=27`、SHA256 一致。②本地 1.75GB（1,880,743,936 B，`tests/serve.ps1` 的 `/huge.bin`）`-Parts 4` → `nseg=75`（证明 >64 段可用）、10.8s、字节精确 |
 | 一次性 runner `scripts/ghdl.ps1`（Windows） | 已实测 | 多次真实下载全 `DOWNLOAD_VERIFIED_OK`：fzf 1.86MB（单流）、rclone 31.6MB（`-ForceLadder`）、OBS 223MB（`-Parts 16` 分段 + `--parallel` 快路径） |
 | P2 自适应段 + 多源 + 工作窃取（`-Parts N`） | 已实测 | OBS 223.7MB：32.3s（同刻单流 31.2s），`RAMP_UP 4→6→8` / `BACKOFF→4`，`steals=5 repairs=5`，字节精确 |
 | P2 `curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`） | 已实测 | 同资产 31.6s，`engine=parallel segments=18 steals=0`，校验通过；旧写法用 `-K` 配置文件分组只跑第一段，已改 `--next` |
