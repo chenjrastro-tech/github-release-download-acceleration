@@ -55,7 +55,16 @@ function Test-Port([string]$h,[int]$p,[int]$ms = 600) {
   } catch { return $false } finally { $c.Close() }
 }
 $portList = 7890,7891,7897,7898,1080,10808,10809,2080,8889,20171,8080
-$listen = @($portList | Where-Object { Test-Port '127.0.0.1' $_ })
+# 并发探测：本机对「关闭的端口」不一定立刻回 RST，串行逐口 600ms 会白等 6 秒（实测 11 口 6.2s）。
+# 一次发起全部连接、总共只等 400ms，命中就按命中的那几个走。
+$probe = @()
+foreach ($p in $portList) {
+  $c = New-Object Net.Sockets.TcpClient
+  $probe += [pscustomobject]@{ Port = $p; Client = $c; H = $c.BeginConnect('127.0.0.1', $p, $null, $null).AsyncWaitHandle }
+}
+try { [void][Threading.WaitHandle]::WaitAll([Threading.WaitHandle[]]@($probe | ForEach-Object { $_.H }), 400) } catch { }
+$listen = @($probe | Where-Object { $_.Client.Connected } | ForEach-Object { $_.Port })
+$probe | ForEach-Object { try { $_.Client.Close() } catch { } }
 $sysProxy = 'n/a'
 if ($onWin) {
   $reg = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
@@ -85,15 +94,21 @@ if ($onWin) {
   if ($env:ProgramFiles) { $base += (Join-Path $env:ProgramFiles 'Clash Verge') }
   if (${env:ProgramFiles(x86)}) { $base += (Join-Path ${env:ProgramFiles(x86)} 'Clash Verge') }
   if ($env:LOCALAPPDATA) { $base += @((Join-Path $env:LOCALAPPDATA 'Programs\Clash Verge'), (Join-Path $env:LOCALAPPDATA 'Clash Verge')) }
-  foreach ($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' } | ForEach-Object { $_.Name })) {
-    $base += @((Join-Path $d 'Clash Verge'), (Join-Path $d 'Apps\Clash Verge'), (Join-Path $d 'Tools\Clash Verge'))
-  }
-  $sm = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
-  if (Test-Path $sm) {
-    $sh = New-Object -ComObject WScript.Shell
-    $base += @(Get-ChildItem $sm -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue |
-      Where-Object Name -match 'Clash.*Verge' |
-      ForEach-Object { Split-Path $sh.CreateShortcut($_.FullName).TargetPath -Parent })
+  # 已经有代理在监听：不需要找内核，跳过「全盘 + 开始菜单递归」这段（实测省 5-6 秒）。
+  # 直连/镜像都不通、必须自己拉内核时才做全盘扫描。
+  if ($listen.Count -eq 0 -and -not $up) {
+    foreach ($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' } | ForEach-Object { $_.Name })) {
+      $base += @((Join-Path $d 'Clash Verge'), (Join-Path $d 'Apps\Clash Verge'), (Join-Path $d 'Tools\Clash Verge'))
+    }
+    $sm = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+    if (Test-Path $sm) {
+      $sh = New-Object -ComObject WScript.Shell
+      $base += @(Get-ChildItem $sm -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue |
+        Where-Object Name -match 'Clash.*Verge' |
+        ForEach-Object { Split-Path $sh.CreateShortcut($_.FullName).TargetPath -Parent })
+    }
+  } else {
+    'KERNEL_SCAN_SKIPPED: 已有代理在监听，跳过全盘/开始菜单扫描'
   }
   # 多份安装取 exe 最新的那份：旧内核配新配置会读不懂字段
   $cand = @($base | Where-Object { $_ -and (Test-Path (Join-Path $_ 'verge-mihomo.exe')) } |
@@ -376,6 +391,10 @@ if ($verifiedBefore) {
   $chunk = [int64]($perKB * 1024 * 4)
   if ($chunk -lt 2MB) { $chunk = 2MB } elseif ($chunk -gt 24MB) { $chunk = 24MB }
   $workers = [math]::Min([math]::Max([int]$parts, 2), 16)
+  # 首波要让 worker 全用上：段至少 total/workers，否则最后只剩几条连接在跑尾巴（实测 23 段 16 并发多花 3 秒）。
+  $wave = [int64][math]::Ceiling($total / [double]$workers)
+  if ($chunk -lt $wave) { $chunk = $wave }
+  if ($chunk -gt 24MB) { $chunk = 24MB }
   $nseg = [int][math]::Ceiling($total / [double]$chunk)
   if ($nseg -lt $workers) { $nseg = $workers }
   if ($nseg -gt 128) { $nseg = 128 }
@@ -445,7 +464,10 @@ if ($verifiedBefore) {
     }
     # 并发不是越大越好：先 4 条起步，吞吐涨就加、出现卡住就砍。实测同一节点 16 条并发会被直接重置。
     $wMax = [math]::Min([math]::Max([int]$parts, 4), 16)
-    $wCur = [math]::Min(4, $wMax)
+    # 阶梯已经量出「多连接快多少」就直接用这个结论起步，别再从 4 条慢慢爬：
+ # 只靠窗口涨幅爬坡，在「每连接限速且已经跑满」时涨幅恒为 0，会永远卡在 4 条。
+ # $ratio >= 4（16 段比 1 段快 4 倍以上）→ 直接上满；>= 1.25（阶梯判分段胜出）→ 从 8 起；否则 4 起。
+ $wCur = $(if ($parts -ge 8 -and $ratio -ge 4) { $wMax } elseif ($parts -ge 8) { [math]::Min($wMax, 8) } else { [math]::Min(4, $wMax) })
     "engine=steal segments=$nseg chunk=$([math]::Round($chunk/1MB,1))MB workers=start$wCur/$wMax pool=$poolNames"
     $running = @{}
     $jobId = 0
