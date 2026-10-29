@@ -414,12 +414,23 @@ if ($verifiedBefore) {
   if ((Test-Path $out) -and $total -gt 0 -and (Get-Item $out).Length -lt $total) {
     $singleResume = @('-C','-'); "SINGLE_RESUME: 从 $((Get-Item $out).Length) 字节继续"
   }
-  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $singleResume + $retry
+  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-D',"$out.headers",'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $singleResume + $retry
   if ($winProxy) { $a += @('--proxy', $winProxy) }
   $a += $winUrl
   $st = (& $curlExe @a | Out-String).Trim()
   "SINGLE exit=$LASTEXITCODE $st"
   if ($LASTEXITCODE -ne 0) { throw "SINGLE_FAILED: exit=$LASTEXITCODE $st" }
+  # 三方差一即失败：远端声明的 Content-Length 必须等于 total（续传时 Content-Length 只剩剩余字节，不参与比对）
+  # 注意 -D 会把重定向链上每一跳的响应头都写进来，必须取「最后一个」Content-Length（302 那跳是 0）
+  if (-not $singleResume -and (Test-Path "$out.headers")) {
+    $cls = [regex]::Matches([IO.File]::ReadAllText("$out.headers"), '(?im)^content-length:\s*(\d+)\s*$')
+    if ($cls.Count -gt 0 -and $total -gt 0) {
+      $declared = [int64]$cls[$cls.Count - 1].Groups[1].Value
+      if ($declared -gt 0 -and $declared -ne $total) { throw "SIZE_MISMATCH: Content-Length=$declared 与 total=$total 不一致（下载被截断或换过文件），文件留在 $out" }
+      "content_length_ok=$declared"
+    }
+  }
+  Remove-Item "$out.headers" -Force -ErrorAction SilentlyContinue
   if ($total -le 0) { $total = (Get-Item $out).Length; "total_from_download=$total" }
   $parts = 1
 } else {
@@ -705,7 +716,7 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 
 ### POSIX 兜底（`scripts/ghdl.sh`，macOS/Linux **未验证**）
 
-`scripts/ghdl.sh` 是同一套流程的 POSIX 实现：探监听端口 → 探针选路 → 1/16 限时阶梯 → 单流或多段 range → sha256 校验。只用 `/bin/sh` + 系统 curl，不用 bash 数组、`/dev/tcp`、jq、python。
+`scripts/ghdl.sh` 是同一套流程的 POSIX 实现：探监听端口 → 探针选路 → 1/16 限时阶梯 → 单流或多段 range → sha256 校验。只用 `/bin/sh` + 系统 curl，不用 bash 数组、`/dev/tcp`、jq、python。P3 之后它也有：孤儿 curl 清理（`pgrep -f`，没有 pgrep 时退回 `ps -ax`）、幂等（`ALREADY_DONE`）、单流断点续传（`-C -`，先写 `.part` 再改名）、分段跨进程续传（`<成品>.parts/manifest` + 只补剩余字节）、逐段长度硬核（`SEGMENT_SIZE_MISMATCH`）、`Content-Length` 与 total 的方差校验、`FORCE_CLEAN=1` 清理。API 403 拿不到 total 时用 1 字节 range 的 `Content-Range` 反推。
 
 **状态：未验证。** 它只在 Windows 的 Git Bash 下过了 `sh -n` 语法检查；真实 macOS 12+ 与 Linux（dash/glibc）都没有跑过。跑通之前，对外只能说「Windows 已实测」，不许写「支持 macOS/Linux」。
 ## 支持矩阵
@@ -727,14 +738,18 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 | P2 自适应段 + 多源 + 工作窃取（`-Parts N`） | 已实测 | OBS 223.7MB：32.3s（同刻单流 31.2s），`RAMP_UP 4→6→8` / `BACKOFF→4`，`steals=5 repairs=5`，字节精确 |
 | P2 `curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`） | 已实测 | 同资产 31.6s，`engine=parallel segments=18 steals=0`，校验通过；旧写法用 `-K` 配置文件分组只跑第一段，已改 `--next` |
 | 故障注入：下载中杀掉一条 curl | 已实测 | 30.7s 完成，`steals=2 repairs=3` 续传补齐，`DOWNLOAD_VERIFIED_OK` |
-| 一次性 runner `scripts/ghdl.sh`（POSIX） | 部分验证 | 在 Windows Git Bash（MSYS2，sh 5.x）跑通：单流下载 + `PARTS=16` 分段拼装 + SHA256 全对；真实 macOS/Linux、dash/BSD sh **未实测** |
+| 一次性 runner `scripts/ghdl.sh`（POSIX） | 部分验证 | 在 Windows Git Bash（MSYS2，sh 5.x）跑通：单流下载、`PARTS=16` 分段拼装、`ALREADY_DONE`、单流 `-C -` 续传、预置 manifest + 半截分片的分段续传（`SEG_RESUME`，最终 SHA256 与源一致）；真实 macOS/Linux、dash/BSD sh **未实测** |
+| POSIX 任意 https 直链（`ghdl.sh`） | 部分验证 | Git Bash 实测 `direct=True`、`Content-Range` 反推 total、单流下载 `DOWNLOAD_SIZE_OK_NO_DIGEST`；GitHub release 路径同时复测通过 |
+| POSIX 跨进程续传 + 幂等 | 部分验证 | Git Bash 实测：预置 manifest + 截短分片 → `RESUME_PLAN` + `SEG_RESUME` + 拼装后 SHA256 与源一致；真实 macOS/Linux 未测 |
+| POSIX 孤儿清理（`pgrep -f`） | 未验证 | Git Bash 没有 `pgrep`，退回 `ps -ax` 时 MSYS 又不显示进程参数 → 这条路径在 Windows 上扫不到（Windows 请用 `ghdl.ps1` 的 WMI 版）；真实 macOS/Linux 的分支未跑过 |
+| 三方差一校验（total / Content-Length / digest） | 已实测 | 单流响应头 `Content-Length` 与 `total` 不等即 `SIZE_MISMATCH` + exit 1；分段按 `end-start+1` 逐段硬核；digest 不符 `DOWNLOAD_VERIFY_FAILED` |
 | 「真零前置」：PATH 只剩系统目录 + 清空 HTTP(S)_PROXY/ALL_PROXY | 已实测（Windows） | 非管理员会话、`PATH=C:\Windows{;\system32;\System32\WindowsPowerShell\v1.0}`，靠端口探测找到 7897，全程 SHA256 校验通过 |
 | frontmatter 最小公共集（只有 name + description） | 已实测 | 严格宿主遇到未知键会整条丢弃技能；触发条件写进 description，`validate.ps1` 只放行这两个键 |
 | P3 任意 https 直链（非 GitHub） | 已实测 | 本机假服务器与真实 https 直链：`direct=True`、`-r 0-0` 从 `Content-Range` 反推 total，只做字节校验 |
 | P3 断点续传 + 幂等 | 已实测 | 真机重跑命中 `ALREADY_DONE`；夹具预置 manifest + 半截分片 → `RESUME_PLAN` 续上、字节精确 |
 | P3 孤儿 curl 收尾 | 已实测 | 先起 `curl --limit-rate 200k` 写同一分片，再跑 runner → `ORPHANS_KILLED: 1 个残留 curl …` 后正常完成 |
 | P3 逐段强校验 + 退出码 | 已实测 | 预置 9,000,000B 超长分片 → `SEGMENT_SIZE_MISMATCH`、exit=1、`PARTS_KEPT`（现场不删） |
-| P3 离线回归测试 | 已实测 | `tests\run-tests.ps1` → `TESTS_OK: 27 项通过`（9 组场景，本机 18765 端口，无外网） |
+| P3 离线回归测试 | 已实测 | `tests\run-tests.ps1` → `TESTS_OK: 34 项通过`（12 组场景，本机 18765 端口，无外网） |
 
 其它未验证项：macOS 上的 Clash Verge 内核路径、Windows 上超出 6 个镜像的候选、1Gbps 以上链路下的阶梯采样偏差。
 
@@ -797,7 +812,12 @@ $code = ([regex]::Matches($t, '(?ms)^[ \t]*```(?:powershell|pwsh|ps1)[ \t]*\r?\n
 - **收尾**：`7897` 不再监听、`Get-Process verge-mihomo` 无本次残留、`ProxyEnable` 与开始时一致（初始 0）；只按 `$corePid`/`$curlPids` 以 Id 停进程。
 - **加载证明**：`skill` 工具能真正加载 `github-release-download-acceleration`（返回技能名/正文），不是只看目录存在；本技能只做本地验证，不 `git init`、不 push。
 - **P3 四条断言的输出形态**：直链走 `direct=True`；重跑命中 `ALREADY_DONE` 或 `RESUME_PLAN`；收尾有 `ORPHANS_KILLED`；逐段不符必须 `SEGMENT_SIZE_MISMATCH` + 退出码 1 + `PARTS_KEPT`（且**不能**打印 `DOWNLOAD_VERIFIED_OK`）。
-- **离线回归**：`powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1` 必须 `TESTS_OK: 27 项通过`（9 组场景：单流/幂等/`-ForceClean`/16 段/续传/坏分片/短包/无 Range/全灭）。
+- **重定向链的响应头有多份。** `curl -D` 会把每一跳都写进去，302 那跳的 `Content-Length: 0` 在文件开头；取第一个就会把「下载成功」误判成「短包」。必须取最后一个（PS 用 `[regex]::Matches(...)[-1]`，sh 用 `tail -n1`）。
+- **直链的总长探测也得走代理。** 实测 `raw.githubusercontent.com` 在本机必须经 7897：不加 `--proxy` 时 `Content-Range` 那条探测静默失败，`total` 退化成 0，后面的幂等/续传/方差校验全部失去依据。
+- **小文件不能用 256KB 当探针门槛。** 直链经常是小文本；门槛一律 256KB 会得到 `NO_ROUTE`。已知 total 时门槛降到 total，未知且是直链时降到 1KB。
+- **Git Bash 不是 Linux。** 它没有 `pgrep`，`ps -ax` 只显示 `/ucrt64/bin/curl` 不显示参数（孤儿扫描在 Windows 上只能靠 `ghdl.ps1` 的 WMI 版）；它自带的 `curl` 是 `Git/ucrt64/bin/curl.exe`，跟 `C:\Windows\System32\curl.exe` 不是同一个二进制——「在 Git Bash 跑通」不等于「系统 curl 跑通」。
+- **单流先写 `.part` 再改名。** 直接写成品，被强杀或被杀软打断就会留下一个「看起来下完了」的短文件；改名是最后一步，前面任何失败都不动成品。
+- **离线回归**：`powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1` 必须 `TESTS_OK: 34 项通过`（12 组：单流/幂等/`-ForceClean`/16 段/续传/坏分片/短包/无 Range/全灭/直链 404/死代理/并发过大）。
 
 ## 维护与自检（改完必跑）
 

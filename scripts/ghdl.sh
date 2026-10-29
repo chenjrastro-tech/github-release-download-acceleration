@@ -37,6 +37,27 @@ command -v curl >/dev/null 2>&1 || { echo "NO_CURL: 没有 curl，本脚本不�
 CURL_VER=$(curl -V | head -n1 | awk '{print $2}')
 PROXY=${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}
 
+# ---------- 0.5 孤儿收尾（必须在任何探测/下载之前） ----------
+# pgrep 的 pattern 是正则：路径里的反斜杠会被当转义，所以只匹配资产名（无路径分隔符）
+sweep_orphans() {
+  pat="${asset:-}"
+  [ -n "$pat" ] || pat="$OUTDIR"
+  # pgrep 是首选（macOS/Linux 都有）；Git Bash 没有 pgrep，退回 ps。
+  # 注意：MSYS 的 ps 不显示进程参数，所以在 Windows Git Bash 上这里大概率扫不到——
+  # Windows 请用 scripts/ghdl.ps1（它用 WMI 拿完整命令行）。真实 macOS/Linux 走 pgrep 分支。
+  if command -v pgrep >/dev/null 2>&1; then
+    list=$(pgrep -f "curl.*${pat}" 2>/dev/null || true)
+  else
+    list=$(ps -ax -o pid=,args= 2>/dev/null | grep '[c]url' | grep -F "$pat" | awk '{print $1}' || true)
+  fi
+  [ -z "${list:-}" ] && return 0
+  for pid in $list; do
+    kill -9 "$pid" 2>/dev/null || true
+    echo "ORPHANS_KILLED: $pid"
+  done
+  sleep 1
+}
+
 tmpd=$(mktemp -d "${TMPDIR:-/tmp}/ghdl.XXXXXX")
 cleanup() {
   rm -rf "$tmpd"
@@ -48,10 +69,18 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---------- 0. 解析 URL ----------
+DIRECT=0
 case "$URL" in
   https://github.com/*/releases/*) ;;
-  *) echo "BAD_URL: 只接受 https://github.com/<owner>/<repo>/releases/... ：$URL" >&2; exit 2 ;;
+  https://*) DIRECT=1 ;;
+  *) echo "BAD_URL: 只接受 https 直链或 https://github.com/<owner>/<repo>/releases/... ：$URL" >&2; exit 2 ;;
 esac
+if [ "$DIRECT" = "1" ]; then
+  repo=""; tag=""
+  asset=${URL##*/}
+  asset=$(printf '%s' "$asset" | sed 's/[?#].*$//')
+  echo "direct=True asset=$asset"
+else
 rest=${URL#https://github.com/}
 owner=${rest%%/*}; rest=${rest#*/}
 repo_name=${rest%%/*}; rest=${rest#*/}
@@ -60,6 +89,7 @@ tag=$(printf '%s' "$rest" | sed -n 's#^download/\([^/]*\)/.*#\1#p; s#^tag/\([^/]
 asset=$(printf '%s' "$rest" | sed -n 's#^download/[^/]*/\(.*\)#\1#p' | head -n1)
 repo="$owner/$repo_name"
 echo "repo=$repo tag=$tag asset=${asset:-(待定)}"
+fi
 
 # ---------- 1. 自检 ----------
 os=$(uname -s)
@@ -74,6 +104,22 @@ done
 echo "listen_port=${found_port:-(无)}"
 
 # ---------- 2. 资产名校验（API；403 限流就降级继续） ----------
+TOTAL=0
+WANT=""
+if [ "$DIRECT" = "1" ]; then
+  # 直链没有 API：用 1 字节 range 的 Content-Range 反推总长，拿不到就只做字节校验
+  dp=""
+  if [ -n "${PROXY:-}" ]; then dp="--proxy $PROXY"; elif [ -n "$found_port" ]; then dp="--proxy http://127.0.0.1:$found_port"; fi
+  h=$(curl -sS -L -m 20 -r 0-0 -A 'Mozilla/5.0' $dp -D - -o /dev/null "$URL" 2>/dev/null || true)
+  cr=$(printf '%s' "$h" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Rr]ange: *bytes [0-9]*-[0-9]*\/\([0-9][0-9]*\).*/\1/p' | tail -n1)
+  if [ -z "${cr:-}" ]; then
+    # 有的服务忽略 Range 直接回整包：退回 HEAD 的 Content-Length
+    hl=$(curl -sSI -L -m 20 -A 'Mozilla/5.0' $dp "$URL" 2>/dev/null | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *\([0-9][0-9]*\)$/\1/p' | tail -n1 || true)
+    [ -n "${hl:-}" ] && [ "$hl" -gt 0 ] && cr=$hl
+  fi
+  [ -n "${cr:-}" ] && TOTAL=$cr
+  echo "asset=$asset total=${TOTAL:-0} api=direct"
+else
 api="https://api.github.com/repos/$repo/releases/tags/$tag"
 tok=${GITHUB_TOKEN:-}
 # api.github.com 在很多网络里必须走代理：复用第 1 步探测到的端口（环境变量代理优先）。
@@ -132,9 +178,15 @@ else
   echo "API_UNEXPECTED: code=$api_code，按 URL 继续" >&2
 fi
 
+fi
+
 [ -n "${asset:-}" ] || { echo "BAD_URL: 没解析出资产名，请直接给 /releases/download/<tag>/<file> 链接" >&2; exit 2; }
 
-u="https://github.com/$repo/releases/download/$tag/$asset"
+if [ "$DIRECT" = "1" ]; then
+  u="$URL"
+else
+  u="https://github.com/$repo/releases/download/$tag/$asset"
+fi
 
 # ---------- 3. 选路（镜像 vs 直连 vs 现有代理，1MB range 探针） ----------
 probe() { # $1=name $2=url $3=proxy(可空)
@@ -153,10 +205,12 @@ probe() { # $1=name $2=url $3=proxy(可空)
 
 : > "$tmpd/probes"
 i=0
+if [ "$DIRECT" = "0" ]; then
 for m in https://ghfast.top https://ghproxy.net https://gh-proxy.com https://github.moeyy.xyz https://gh.llkk.cc https://ghproxy.cc; do
   probe "C 镜像 $m" "$m/$u" "" >> "$tmpd/probes" &
   i=$((i+1)); echo $! >> "$tmpd/pids"
 done
+fi
 if [ -n "$found_port" ]; then
   probe "A 现有代理 :$found_port" "$u" "http://127.0.0.1:$found_port" >> "$tmpd/probes" &
   echo $! >> "$tmpd/pids"
@@ -170,9 +224,12 @@ wait || true
 
 # 过滤出真正拿到数据的路线，按速度排序
 # 每行格式：name|code|bytes|speed|url|proxy
-best=$(awk -F'|' '{
+# 小文件（<256KB）不能拿 256KB 当门槛：直链已知总长时门槛降到总长
+minb=262144
+if [ "${TOTAL:-0}" -gt 0 ] && [ "$TOTAL" -lt 262144 ]; then minb=$TOTAL; fi
+best=$(awk -F'|' -v minb="$minb" '{
     code=$2; bytes=$3+0; spd=$4+0;
-    if ((code=="200"||code=="206") && bytes>=262144) printf "%d\t%s\t%s\t%s\n", spd/1024, $1, $5, $6;
+    if ((code=="200"||code=="206") && bytes>=minb) printf "%d\t%s\t%s\t%s\n", spd/1024, $1, $5, $6;
   }' "$tmpd/probes" | sort -rn | head -n1)
 if [ -z "$best" ]; then
   echo "NO_ROUTE: 所有路线都没拿到数据" >&2
@@ -185,6 +242,32 @@ win_url=$(printf '%s' "$best" | cut -f3)
 win_proxy=$(printf '%s' "$best" | cut -f4)
 echo "route=$win_name KBps=$win_kbps"
 echo "PROBE_206_OK=1"
+
+# ---------- 3.5 拿不到 API（403 限流）时，用 1 字节 range 的 Content-Range 反推总长 ----------
+# 没有 total 的后果很实在：没法幂等、没法续传、没法做 Content-Length 比对，所以必须补。
+if [ "${TOTAL:-0}" -le 0 ]; then
+  if [ -n "$win_proxy" ]; then
+    h=$(curl -sS -L --connect-timeout 10 --max-time 20 -r 0-0 -A 'Mozilla/5.0' -D - -o /dev/null \
+          --proxy "$win_proxy" "$win_url" 2>/dev/null || true)
+  else
+    h=$(curl -sS -L --connect-timeout 10 --max-time 20 -r 0-0 -A 'Mozilla/5.0' -D - -o /dev/null \
+          "$win_url" 2>/dev/null || true)
+  fi
+  cr=$(printf '%s' "$h" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Rr]ange: *bytes [0-9]*-[0-9]*\/\([0-9][0-9]*\).*/\1/p' | tail -n1)
+  if [ -z "${cr:-}" ]; then
+    # 有的路线对 0-0 返回 200（忽略 Range），此时用 HEAD 的 Content-Length 兜底
+    if [ -n "$win_proxy" ]; then
+      hl=$(curl -sSI -L --connect-timeout 10 --max-time 20 -A 'Mozilla/5.0' --proxy "$win_proxy" "$win_url" 2>/dev/null | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *\([0-9][0-9]*\)$/\1/p' | tail -n1 || true)
+    else
+      hl=$(curl -sSI -L --connect-timeout 10 --max-time 20 -A 'Mozilla/5.0' "$win_url" 2>/dev/null | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *\([0-9][0-9]*\)$/\1/p' | tail -n1 || true)
+    fi
+    [ -n "${hl:-}" ] && [ "$hl" -gt 0 ] && cr=$hl
+  fi
+  if [ -n "${cr:-}" ]; then
+    TOTAL=$cr
+    echo "total_from_range=$TOTAL"
+  fi
+fi
 
 # ---------- 4. 单连接探针（8MB） ----------
 single_kbps=0
@@ -242,7 +325,8 @@ elif [ "$big_enough" = "1" ] && [ "$single_kbps" -lt "$FAST_KBPS" ]; then
   echo "LADDER_DONE: rungs=1/16 passes=1 (sh 版只跑一遍)"
 else
   rung1="1|0|0"; rung16="16|0|0"
-  echo "SKIP_LADDER: total=$(( ${TOTAL:-0} / 1048576 ))MB singleKB=$single_kbps (门槛 ${LADDER_MIN_MB}MB / ${FAST_KBPS}KB/s) -> 单流"
+  tmb=$(awk -v t="${TOTAL:-0}" 'BEGIN{ if (t<=0) print "unknown"; else printf "%.1f", t/1048576 }')
+  echo "SKIP_LADDER: total=${tmb}MB singleKB=$single_kbps (门槛 ${LADDER_MIN_MB}MB / ${FAST_KBPS}KB/s) -> 单流"
 fi
 
 k1=$(printf '%s' "$rung1" | cut -d'|' -f2)
@@ -260,44 +344,140 @@ fi
 echo "winN=$winN"
 
 # ---------- 6. 下载 ----------
+# 6.0 再扫一次孤儿（第 0.5 步之后可能有新进程；只按资产名匹配，避免正则吃掉反斜杠）
+sweep_orphans
 mkdir -p "$OUTDIR"
 target="$OUTDIR/$asset"
-if [ "$winN" -gt 1 ] && [ "${TOTAL:-0}" -gt 0 ]; then
-  dir="$tmpd/parts"; mkdir -p "$dir"
-  chunk=$(( TOTAL / winN ))
-  echo "parts=$winN chunk=$chunk"
+if [ "${FORCE_CLEAN:-0}" = "1" ]; then
+  rm -f "$target" "$target.headers"
+  rm -rf "$OUTDIR/$asset.parts"
+  echo "FORCE_CLEAN: 已删旧成品与旧分片"
+fi
+
+# 6.1 幂等：成品已存在且字节数与 total 一致 → 不重下（校验留到第 7 步统一做）
+skip_dl=0
+if [ -f "$target" ] && [ "${TOTAL:-0}" -gt 0 ]; then
+  have=$(wc -c < "$target" | tr -d ' ')
+  if [ "$have" -eq "$TOTAL" ]; then
+    skip_dl=1
+    echo "ALREADY_DONE: $target 已存在且 $have 字节（不重下）"
+  fi
+fi
+
+if [ "$skip_dl" = "1" ]; then
+  echo "engine=cached"
+elif [ "$winN" -gt 1 ] && [ "${TOTAL:-0}" -gt 0 ]; then
+  dir="$OUTDIR/$asset.parts"
+  manifest="$dir/manifest"
+  # 6.2 跨进程续传：分段方案落盘（total chunk nseg），重跑方案一致就沿用，已下好的段跳过
+  m_total=0; m_chunk=0; m_nseg=0
+  if [ -f "$manifest" ]; then
+    read -r m_total m_chunk m_nseg < "$manifest" || true
+  fi
+  if [ "${m_total:-0}" -eq "$TOTAL" ] && [ "${m_nseg:-0}" -ge 1 ] && [ "${m_chunk:-0}" -ge 1 ]; then
+    chunk=$m_chunk; winN=$m_nseg
+    echo "RESUME_PLAN: 沿用上次分段 nseg=$winN chunk=$chunk"
+  else
+    rm -rf "$dir"; mkdir -p "$dir"
+    chunk=$(( TOTAL / winN ))
+    # 反算 chunk 保证 nseg*chunk >= total（否则最后一段会短）
+    while [ $(( chunk * winN )) -lt "$TOTAL" ]; do chunk=$((chunk + 1)); done
+    printf '%s %s %s\n' "$TOTAL" "$chunk" "$winN" > "$manifest"
+    echo "PLAN: nseg=$winN chunk=$chunk"
+  fi
+  echo "engine=plain parts=$winN chunk=$chunk"
   j=0
   while [ $j -lt "$winN" ]; do
     s=$(( chunk * j ))
     if [ "$j" -eq $((winN - 1)) ]; then e=$(( TOTAL - 1 )); else e=$(( s + chunk - 1 )); fi
-    if [ -n "$win_proxy" ]; then
-      curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -r "$s-$e" -m 1800 \
-        -o "$dir/p$j.bin" --proxy "$win_proxy" --retry 3 --retry-delay 2 "$win_url" &
+    part="$dir/p$j.bin"
+    need=$(( e - s + 1 ))
+    have=0
+    if [ -f "$part" ]; then have=$(wc -c < "$part" | tr -d ' '); fi
+    if [ "$have" -eq "$need" ]; then
+      j=$((j+1)); continue
+    fi
+    if [ "$have" -gt "$need" ]; then
+      # 多出来的部分是上次写坏的，从正确边界重来
+      rm -f "$part"; have=0
+    fi
+    if [ "$have" -gt 0 ]; then
+      rs=$(( s + have )); tgt="$part.resume"
+      echo "SEG_RESUME: p$j 从 $have/$need 字节继续"
     else
-      curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -r "$s-$e" -m 1800 \
-        -o "$dir/p$j.bin" --retry 3 --retry-delay 2 "$win_url" &
+      rs=$s; tgt="$part"
+    fi
+    if [ -n "$win_proxy" ]; then
+      ( curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -r "$rs-$e" -m 1800 \
+          -o "$tgt" --proxy "$win_proxy" --retry 3 --retry-delay 2 "$win_url" ; echo $? > "$tgt.rc" ) &
+    else
+      ( curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -r "$rs-$e" -m 1800 \
+          -o "$tgt" --retry 3 --retry-delay 2 "$win_url" ; echo $? > "$tgt.rc" ) &
     fi
     echo $! >> "$tmpd/pids"
     j=$((j+1))
   done
-  wait || { echo "PARTS_FAILED: 有分片失败" >&2; exit 1; }
-  sum=0
-  for f in "$dir"/p*.bin; do sum=$(( sum + $(wc -c < "$f" | tr -d ' ') )); done
-  echo "partsBytes=$sum total=$TOTAL"
-  [ "$sum" -eq "$TOTAL" ] || { echo "PARTS_MISMATCH: sum=$sum total=$TOTAL" >&2; exit 1; }
+  wait || true
+  # 6.3 拼前先逐段硬核：每段字节数必须精确等于 end-start+1，再合并
+  j=0; bad=""
+  while [ $j -lt "$winN" ]; do
+    s=$(( chunk * j ))
+    if [ "$j" -eq $((winN - 1)) ]; then e=$(( TOTAL - 1 )); else e=$(( s + chunk - 1 )); fi
+    need=$(( e - s + 1 ))
+    part="$dir/p$j.bin"
+    if [ -f "$part.resume" ]; then cat "$part.resume" >> "$part"; rm -f "$part.resume"; fi
+    got=0
+    if [ -f "$part" ]; then got=$(wc -c < "$part" | tr -d ' '); fi
+    if [ "$got" -ne "$need" ]; then bad="$bad p$j(need=$need got=$got)"; fi
+    j=$((j+1))
+  done
+  if [ -n "$bad" ]; then
+    echo "SEGMENT_SIZE_MISMATCH:$bad（分片留在 $dir，可直接重跑续传）" >&2
+    exit 1
+  fi
   : > "$target"
   j=0
   while [ $j -lt "$winN" ]; do cat "$dir/p$j.bin" >> "$target"; j=$((j+1)); done
   echo "assembled=$(wc -c < "$target" | tr -d ' ')"
+  rm -rf "$dir"
 else
-  if [ -n "$win_proxy" ]; then
-    curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -o "$target" -m 1800 \
-      --proxy "$win_proxy" --retry 3 --retry-delay 2 -w 'code=%{http_code}|got=%{size_download}|speed=%{speed_download}\n' "$win_url"
-  else
-    curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -o "$target" -m 1800 \
-      --retry 3 --retry-delay 2 -w 'code=%{http_code}|got=%{size_download}|speed=%{speed_download}\n' "$win_url"
+  part0="$target.part"
+  [ -f "$target" ] && mv -f "$target" "$part0" 2>/dev/null || true
+  resume=""
+  if [ -f "$part0" ] && [ "${TOTAL:-0}" -gt 0 ]; then
+    have=$(wc -c < "$part0" | tr -d ' ')
+    if [ "$have" -gt 0 ] && [ "$have" -lt "$TOTAL" ]; then
+      resume="-C -"
+      echo "SINGLE_RESUME: 从 $have 字节继续"
+    fi
   fi
-  echo "SINGLE exit=0"
+  if [ -n "$win_proxy" ]; then
+    # shellcheck disable=SC2086
+    curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -o "$part0" -D "$target.headers" -m 1800 \
+      --proxy "$win_proxy" --retry 3 --retry-delay 2 $resume \
+      -w 'code=%{http_code}|got=%{size_download}|speed=%{speed_download}\n' "$win_url"
+  else
+    # shellcheck disable=SC2086
+    curl -sS -L --fail --connect-timeout 10 -A 'Mozilla/5.0' -o "$part0" -D "$target.headers" -m 1800 \
+      --retry 3 --retry-delay 2 $resume \
+      -w 'code=%{http_code}|got=%{size_download}|speed=%{speed_download}\n' "$win_url"
+  fi
+  rc=$?
+  echo "SINGLE exit=$rc"
+  if [ "$rc" -ne 0 ]; then
+    echo "SINGLE_FAILED: exit=$rc" >&2
+    exit 1
+  fi
+  # 三方差一即失败：远端声明的 Content-Length 必须等于 total（续传时只剩剩余字节，不参与比对）
+  if [ -z "$resume" ] && [ -f "$target.headers" ] && [ "${TOTAL:-0}" -gt 0 ]; then
+    cl=$(tr -d '\r' < "$target.headers" | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -n1)
+    if [ -n "${cl:-}" ] && [ "$cl" -ne "$TOTAL" ]; then
+      echo "SIZE_MISMATCH: Content-Length=$cl 与 total=$TOTAL 不一致" >&2
+      exit 1
+    fi
+  fi
+  rm -f "$target.headers"
+  mv -f "$part0" "$target"
 fi
 
 # ---------- 7. 校验 ----------

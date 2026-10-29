@@ -336,12 +336,23 @@ if ($verifiedBefore) {
   if ((Test-Path $out) -and $total -gt 0 -and (Get-Item $out).Length -lt $total) {
     $singleResume = @('-C','-'); "SINGLE_RESUME: 从 $((Get-Item $out).Length) 字节继续"
   }
-  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $singleResume + $retry
+  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-D',"$out.headers",'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $singleResume + $retry
   if ($winProxy) { $a += @('--proxy', $winProxy) }
   $a += $winUrl
   $st = (& $curlExe @a | Out-String).Trim()
   "SINGLE exit=$LASTEXITCODE $st"
   if ($LASTEXITCODE -ne 0) { throw "SINGLE_FAILED: exit=$LASTEXITCODE $st" }
+  # 三方差一即失败：远端声明的 Content-Length 必须等于 total（续传时 Content-Length 只剩剩余字节，不参与比对）
+  # 注意 -D 会把重定向链上每一跳的响应头都写进来，必须取「最后一个」Content-Length（302 那跳是 0）
+  if (-not $singleResume -and (Test-Path "$out.headers")) {
+    $cls = [regex]::Matches([IO.File]::ReadAllText("$out.headers"), '(?im)^content-length:\s*(\d+)\s*$')
+    if ($cls.Count -gt 0 -and $total -gt 0) {
+      $declared = [int64]$cls[$cls.Count - 1].Groups[1].Value
+      if ($declared -gt 0 -and $declared -ne $total) { throw "SIZE_MISMATCH: Content-Length=$declared 与 total=$total 不一致（下载被截断或换过文件），文件留在 $out" }
+      "content_length_ok=$declared"
+    }
+  }
+  Remove-Item "$out.headers" -Force -ErrorAction SilentlyContinue
   if ($total -le 0) { $total = (Get-Item $out).Length; "total_from_download=$total" }
   $parts = 1
 } else {

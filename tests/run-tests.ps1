@@ -141,12 +141,12 @@ try {
   Check (Has $r.Out 'SEGMENT_SIZE_MISMATCH') '报 SEGMENT_SIZE_MISMATCH'
   Check (Test-Path (Join-Path $d6 '_dl_parts')) '失败时保留分片以便续传'
 
-  # ---------- 7) 短包：服务器只发 700KB，必须失败
+  # ---------- 7) 短包：服务器声明 2MB 只发 700KB，必须由「三方差一」拦下
   "`n[7] 短包"
   $d7 = Join-Path $Work 'short'
   $r = Invoke-Ghdl @('-Url', "$Base/short.bin", '-OutDir', $d7)
   Check ($r.Code -eq 1) '短包 exit=1' "exit=$($r.Code)"
-  Check (Has $r.Out 'DOWNLOAD_VERIFY_FAILED') '短包报 DOWNLOAD_VERIFY_FAILED'
+  Check (Has $r.Out 'SIZE_MISMATCH') '短包报 SIZE_MISMATCH（Content-Length 与 total 不一致）'
 
   # ---------- 8) 不支持 Range：退回单流，但话要说清
   "`n[8] 服务器不支持 Range"
@@ -161,6 +161,37 @@ try {
   $r = Invoke-Ghdl @('-Url', "http://127.0.0.1:18999/x.bin", '-OutDir', $d9)
   Check ($r.Code -eq 1) 'NO_ROUTE exit=1' "exit=$($r.Code)"
   Check (Has $r.Out 'NO_ROUTE') '报 NO_ROUTE'
+
+  # ---------- 10) 直链 404（文件名不存在）：直链没有 API 可查，只能靠探测发现
+  "`n[10] 直链 404"
+  $d10 = Join-Path $Work 'notfound'
+  $r = Invoke-Ghdl @('-Url', "$Base/missing.bin", '-OutDir', $d10)
+  Check ($r.Code -eq 1) '404 exit=1' "exit=$($r.Code)"
+  Check (Has $r.Out 'NO_ROUTE') '404 报 NO_ROUTE'
+
+  # ---------- 11) 死代理端口：环境变量指向没人监听的端口，仍应自动走直连
+  "`n[11] 死代理端口"
+  $d11 = Join-Path $Work 'deadproxy'
+  $o1 = $env:HTTP_PROXY; $o2 = $env:HTTPS_PROXY
+  try {
+    $env:HTTP_PROXY = 'http://127.0.0.1:1'
+    $env:HTTPS_PROXY = 'http://127.0.0.1:1'
+    $r = Invoke-Ghdl @('-Url', "$Base/ok.bin", '-OutDir', $d11)
+  } finally {
+    $env:HTTP_PROXY = $o1
+    $env:HTTPS_PROXY = $o2
+  }
+  Check ($r.Code -eq 0) '死代理下仍能完成 exit=0' "exit=$($r.Code)"
+  Check ((Test-Path (Join-Path $d11 'ok.bin')) -and (Get-Item (Join-Path $d11 'ok.bin')).Length -eq 3145728) '死代理下落盘字节正确'
+
+  # ---------- 12) 并发过大：-Parts 64 必须被夹到 16，且不能失败
+  "`n[12] 并发过大（-Parts 64）"
+  $d12 = Join-Path $Work 'toomany'
+  $r = Invoke-Ghdl @('-Url', "$Base/big.bin", '-OutDir', $d12, '-Parts', '64')
+  Check ($r.Code -eq 0) '-Parts 64 仍能完成 exit=0' "exit=$($r.Code)"
+  $m = [regex]::Match($r.Out, 'workers=start(\d+)/(\d+)')
+  Check ($m.Success -and [int]$m.Groups[1].Value -le 16 -and [int]$m.Groups[2].Value -le 16) '并发被夹到 ≤16' "workers=$($m.Groups[0].Value)"
+  Check ((Get-Item (Join-Path $d12 'big.bin')).Length -eq 123456789) '字节仍精确'
 } finally {
   if ($ownServer) { Stop-Process -Id $ownServer.Id -Force -ErrorAction SilentlyContinue }
   if (-not $Keep) { Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }

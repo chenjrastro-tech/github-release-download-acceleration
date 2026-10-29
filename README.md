@@ -268,11 +268,13 @@ metadata:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
-# TESTS_OK: 27 项通过
+# TESTS_OK: 34 项通过
 ```
 
 `tests/serve.ps1` 用 `TcpListener` 在本机起一个假 Release 服务（支持 Range，也能模拟「只发 700KB 就断」和「根本不支持 Range」），
-`tests/run-tests.ps1` 跑 9 组场景 27 条断言：单流、幂等重跑、`-ForceClean`、16 段分段（123,456,789 B，非段长整数倍）、
+`scripts/ghdl.sh` 同样支持任意 https 直链（`sh scripts/ghdl.sh <url>`，输出目录用 `OUTDIR`）、断点续传与幂等。
+
+`tests/run-tests.ps1` 跑 12 组场景 34 条断言：单流、幂等重跑、`-ForceClean`、16 段分段（123,456,789 B，非段长整数倍）、
 续传（预置 manifest + 半个分片）、坏分片（长度不符）、短包、无 Range 服务器、全灭路线。
 不需要外网、不需要 GitHub 账号、不需要装任何东西；跑完自动清 `%TEMP%\ghdl_tests`（加 `-Keep` 保留现场）。
 
@@ -302,6 +304,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
 ## 变更记录
+
+**0.4.1（2026-10-30）**：①单流「三方差一」校验——下完比对响应头 `Content-Length` 与 `total`，不等即 `SIZE_MISMATCH`（短包不再靠运气）；②POSIX 侧补齐孤儿清理、幂等、单流 `-C -` 续传、分段跨进程续传（`<成品>.parts/manifest`）、`FORCE_CLEAN=1`；③回归套件扩到 12 组 34 条（新增直链 404、死代理端口、`-Parts 64` 并发夹取）。
 
 **0.4.0（2026-10-30）**：P3——①任意直链（不再只认 `github.com/.../releases/download/...`，自建 CDN/GitLab/内网制品库也能用，只做字节校验）；②断点续传 + 幂等（`_dl_parts/manifest.json` 记分段方案，重跑沿用并跳过已下分片；成品已完整则 `ALREADY_DONE`）；③孤儿进程收尾（上次被强杀留下的 curl 先 `ORPHANS_KILLED` 再开工，杜绝双写同一分片）；④逐段强校验（`p000..pN` 每段长度必须等于 `end-start+1`，否则 `SEGMENT_SIZE_MISMATCH` 并保留现场）；⑤退出码语义（只有校验通过才是 0）；⑥`-ForceClean` / `-KeepParts`；⑦离线回归测试 `tests/run-tests.ps1`（9 组场景 27 条断言，本机 18765 端口，不需要外网）。
 
