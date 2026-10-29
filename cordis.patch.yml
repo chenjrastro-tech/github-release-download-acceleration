@@ -5,9 +5,14 @@
 #   · `id` 是 Cordis 插件 id，必须等于 index.js 的 `export const name`；
 #   · `name` 是包名，必须与 package.json 的 `name` 完全一致，否则开机解析会失败。
 #
+# 注意：包名是 `github-release-accelerator`，与仓库名（github-release-download-
+# acceleration）不同——npm registry 拒绝包名里出现 "download" 这个词
+# （400 That word is not allowed），所以发布用的包名去掉了它。技能名仍然是
+# github-release-download-acceleration，不受影响。
+#
 # 本插件没有可覆写配置：它只把包自带的 SKILL.md 挂进技能目录。技能自己的阈值
 # （min_size_for_ladder_mb / single_conn_fast_kbps）写在 SKILL.md 的 frontmatter 里，
 # 主机相关的代理端口、镜像列表全部由技能在运行时自检，不进这里。
 - insert:
     - id: github-release-download-acceleration
-      name: 'github-release-download-acceleration'
+      name: 'github-release-accelerator'

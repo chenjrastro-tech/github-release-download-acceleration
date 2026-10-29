@@ -214,7 +214,12 @@ if (-not (Test-Path -LiteralPath $pkgPath)) {
   try { $pkg = $pkgText | ConvertFrom-Json } catch { Bad "package.json 不是合法 JSON：$($_.Exception.Message)" }
   if ($pkg) {
     if ($pkg.name -eq $dirName) { Ok "package.json name 与目录名一致（$($pkg.name)）" }
-    else { Bad "package.json name=$($pkg.name) 与目录名 $dirName 不一致" }
+    elseif ($pkg.name) {
+      # 允许不一致：npm registry 会拒绝包名里的某些词（例如 download → 400 That word
+      # is not allowed），发布名与仓库目录名不同是正常情况，不算错误。
+      Ok "package.json name=$($pkg.name) 与目录名 $dirName 不同（npm 发布名，允许）"
+    }
+    else { Bad "package.json 缺少 name" }
     if ($pkg.name -match '^[a-z0-9]+(?:-[a-z0-9]+)*$') { Ok "package.json name 是 kebab-case" }
     else { Bad "package.json name 不是 kebab-case：$($pkg.name)" }
     if ($pkg.version -match '^\d+\.\d+\.\d+') { Ok "package.json version = $($pkg.version)" }

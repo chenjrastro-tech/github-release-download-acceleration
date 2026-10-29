@@ -69,6 +69,14 @@ dsh plugin add github:chenjrastro-tech/github-release-download-acceleration
 
 包装层就是 `package.json` + `cordis.patch.yml` + `index.js` 三个文件：DSH 装上后由 `index.js` 把包内的 `SKILL.md` 注册成技能（`source: bundled`、rank 600）。因此它同时是「能手动放的技能目录」和「能用 `dsh plugin add` 装的插件包」，两条路读的是同一份 `SKILL.md`，不会出现两份正文漂移。
 
+5. 也发布到了 npm，但包名不叫 `github-release-download-acceleration`，而是 **`github-release-accelerator`**：
+
+```powershell
+npm i github-release-accelerator
+```
+
+原因：npm registry 拒绝包名里出现 `download` 这个词（`400 That word is not allowed`），所以发布名去掉了它；仓库名与技能名保持不变（仍为 `github-release-download-acceleration`）。npm 包与 `dsh plugin add` 装的是同一份代码，在 DSH 里建议用上面第 4 条。
+
 **其它基于 SKILL.md 的宿主**（Codex 等）：把整个目录放进其技能目录，`agents/openai.yaml` 提供 `display_name` / `short_description` / `default_prompt` 展示信息。
 
 **环境要求**：Windows 10/11 + Windows PowerShell 5.1 + 系统自带 `curl.exe`（Win10 1803+ 自带）。没有任何第三方依赖。
@@ -228,7 +236,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 
 ## 变更记录
 
-- **2026-10-29（最新）**：打包成可进插件市场的插件包 —— 新增 `package.json`（声明 `dsh.bundle.patch`）、`cordis.patch.yml`、`index.js`（技能 provider，零依赖，把包内 `SKILL.md` 挂进 `ctx.skills`，`source: bundled`、rank 600）。版本号提到 **0.2.0**。技能正文与阈值未变，`validate.ps1` 仍 `VALIDATE_OK`。
+- **2026-10-29（最新）**：发布到 npm，包名 **`github-release-accelerator`**（`0.2.1`）——npm registry 拒绝包名里出现 `download`（`400 That word is not allowed`），所以 npm 发布名去掉该词，仓库名与技能名不变；`cordis.patch.yml` 的 `name` 随之改为包名（`id` 仍是技能名），`validate.ps1` 允许包名与目录名不同。新增市场卡片图标与三张实测截图（`assets/` + `screenshots.json`），PR 条目补 `icon:`。
+- 2026-10-29：打包成可进插件市场的插件包 —— 新增 `package.json`（声明 `dsh.bundle.patch`）、`cordis.patch.yml`、`index.js`（技能 provider，零依赖，把包内 `SKILL.md` 挂进 `ctx.skills`，`source: bundled`、rank 600）。版本号提到 **0.2.0**。技能正文与阈值未变，`validate.ps1` 仍 `VALIDATE_OK`。
 - 2026-10-28：`SKILL.md` 正文与围栏注释精简（+47 / −66 行）：`description` 收成一句、删掉与正文重复的实测数字罗列、压缩第 1/3/4/5/6 步的解释性注释。**行为、阈值与十一个步骤的顺序均未变化**，`validate.ps1` 仍 `VALIDATE_OK`。
 - 2026-10-28：阶梯门槛从 60 MB 提到 **100 MB**，并搬到 frontmatter 的 `metadata` 里变成可配置项（`min_size_for_ladder_mb` / `single_conn_fast_kbps`，`validate.ps1` 校验代码里的 `$ladderMinMB`/`$fastKB` 是否同步）；新增「第 5 步单连接探针 ≥3 MB/s 就跳过阶梯」这个免费判据；阶梯从 1/4/16 三档缩到 **1/16 两档 × 三遍**，胜出档加「波动 ≤2×」「两档差 10% 内选低并发」「多段快 1.25 倍才分段」。理由：节点不限速时 16 段实测 **0.72×**（单流 5,829 vs 16 段 4,175 KB/s），而阶梯本身要 20–26 秒、还可能顺带下载上百 MB 采样流量。
 - 更早：资产名校验闸门（`ASSET_NOT_FOUND` + 候选清单）、无 digest 降级（`DOWNLOAD_SIZE_OK_NO_DIGEST`）、`$winN` 真正驱动第 7 步分段数（此前阶梯测完但硬编码 `$parts = 16`）、`agents/openai.yaml` 与 `scripts/validate.ps1` 补齐。
