@@ -265,20 +265,20 @@ $ErrorActionPreference = 'Stop'
 $parts = $winN
 if (-not $parts) { $parts = 1 }
 $vc = $(if ($curlVer -match '^(\d+)\.(\d+)') { [version]"$($Matches[1]).$($Matches[2])" } else { [version]'0.0' })
-$retry = @('--retry','3','--retry-delay','2')
+$retry = @('--retry', '3', '--retry-delay', '2')
 if ($vc -ge [version]'7.71') { $retry += '--retry-all-errors' } else { "RETRY_DEGRADED: curl $curlVer < 7.71，只用 --retry 3 --retry-delay 2" }
 $base = $OutDir
-$dir  = Join-Path $base '_dl_parts'
-$out  = Join-Path $base $asset
+$dir = Join-Path $base '_dl_parts'
+$out = Join-Path $base $asset
 New-Item -ItemType Directory $base -Force | Out-Null
-# 小资产、单流足够快、或总字节数未知时都走单流；若是 -Parts 指定却被挡下，说清原因
 if ($Parts -gt 0 -and $winN -gt 1 -and ($total -le 0 -or $total -lt ($ladderMinMB * 1MB))) {
-  "PARTS_IGNORED: 资产 $([math]::Round($total/1MB,1))MB（闸值 ${ladderMinMB}MB）或总字节数未知，分段只会更慢，改走单流"
-  $winN = 1
+  "PARTS_IGNORED: 资产 $([math]::Round($total/1MB,1))MB（闸值 ${ladderMinMB}MB）或总字节数未知，分段只会更慢，走单流"
+  $winN = 1; $parts = 1
 }
+$engine = 'single'; $workers = 0; $segCount = 0; $stolen = 0; $repairs = 0
 if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
   $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $retry
-  if ($winProxy) { $a += @('--proxy',$winProxy) }
+  if ($winProxy) { $a += @('--proxy', $winProxy) }
   $a += $winUrl
   $st = (& $curlExe @a | Out-String).Trim()
   "SINGLE exit=$LASTEXITCODE $st"
@@ -287,22 +287,179 @@ if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
   $parts = 1
 } else {
   if ($dir -match ' ') { throw "SPACE_IN_PATH: $dir 含空格，5.1 的 Start-Process 会拆坏 -o" }
-  $freeGB = [math]::Round((Get-PSDrive (([IO.Path]::GetPathRoot($dir)).TrimEnd('\').TrimEnd(':'))).Free / 1GB, 1)
+  $root = ([IO.Path]::GetPathRoot($dir)).TrimEnd('\').TrimEnd(':')
+  $freeGB = [math]::Round((Get-PSDrive $root).Free / 1GB, 1)
   $needGB = [math]::Round(($total * 2 / 1GB), 1)
   if ($freeGB -lt $needGB) { throw "SPACE_LOW: free=${freeGB}GB need=${needGB}GB" }
-  if ([math]::Floor($total / $parts) -lt 2MB) { $parts = [math]::Max(1, [int][math]::Floor($total / 2MB)) }
+
+  # 路线池：第 4 步实测拿到完整 1MB 且 code=206 的前三条，多源并行从这里轮流取
+  $poolAll = @($results | Where-Object { $_.Code -eq '206' -and $_.Bytes -ge 1048576 } | Sort-Object KBps -Descending)
+  $poolMin = [math]::Max(200, [int](0.35 * [math]::Max([int]$poolAll[0].KBps, 1)))
+  $pool = @($poolAll | Where-Object { $_.KBps -ge $poolMin } | Select-Object -First 3)
+  if ($pool.Count -eq 0) { $pool = @($route) }
+  $poolNames = ($pool | ForEach-Object { $_.Name }) -join ' + '
+
+  # 自适应段大小：按单连接实测速度让每段约 4 秒的活，夹在 2MB..24MB，段数 1..64
+  $perKB = [math]::Max([int]$singleKB, 512)
+  $chunk = [int64]($perKB * 1024 * 4)
+  if ($chunk -lt 2MB) { $chunk = 2MB } elseif ($chunk -gt 24MB) { $chunk = 24MB }
+  $workers = [math]::Min([math]::Max([int]$parts, 2), 16)
+  $nseg = [int][math]::Ceiling($total / [double]$chunk)
+  if ($nseg -lt $workers) { $nseg = $workers }
+  if ($nseg -gt 64) { $nseg = 64 }
+  $chunk = [int64][math]::Ceiling($total / [double]$nseg)
+
   Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory $dir -Force | Out-Null
-  $chunk = [int64][math]::Floor($total / $parts)
-  for ($i = 0; $i -lt $parts; $i++) {
-    $s = [int64]($i * $chunk)
-    $e = $(if ($i -eq $parts - 1) { $total - 1 } else { $s + $chunk - 1 })
-    $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$s-$e",'-o',(Join-Path $dir "p$i.bin"),'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}') + $retry
-    if ($winProxy) { $a += @('--proxy',$winProxy) }
-    $a += $winUrl
-    $curlPids += (Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $dir "p$i.log") -RedirectStandardError (Join-Path $dir "p$i.err")).Id
+  $pids = New-Object System.Collections.ArrayList
+  $swE = [Diagnostics.Stopwatch]::StartNew()
+  $segFile = { param($i) Join-Path $dir ("p{0:000}.bin" -f $i) }
+  $rangeOf = { param($i) $s = [int64]($i * $chunk); [pscustomobject]@{ S = $s; E = $(if ($i -eq $nseg - 1) { $total - 1 } else { $s + $chunk - 1 }) } }
+
+  # fast path：curl >= 7.66 时单进程 --parallel 把所有段一次拉完（无窃取，但进程开销最低）
+  # 注意：不能用 -K 配置文件分组（实测 cfg 里的 next 分隔只跑第一段），必须用 --next 命令行分组。
+  $useParallel = ($env:GHDL_PARALLEL -eq '1') -and ($vc -ge [version]'7.66')
+  if ($useParallel) {
+    $pa = @('--parallel', '--parallel-max', "$workers", '--show-error', '--silent')
+    for ($i = 0; $i -lt $nseg; $i++) {
+      if ($i -gt 0) { $pa += '--next' }
+      $rg = & $rangeOf $i
+      $r = $pool[$i % $pool.Count]
+      $pa += @('-L', '--fail', '--connect-timeout', '10', '-A', 'Mozilla/5.0', '--retry', '3', '--retry-delay', '2')
+      $pa += @('-o', (& $segFile $i), '-r', "$($rg.S)-$($rg.E)")
+      if ($r.Proxy) { $pa += @('--proxy', $r.Proxy) }
+      $pa += $r.Url
+    }
+    $plog = Join-Path $dir 'parallel.log'
+    $pp = Start-Process $curlExe -ArgumentList $pa -NoNewWindow -PassThru -RedirectStandardOutput $plog -RedirectStandardError (Join-Path $dir 'parallel.err')
+    [void]$pids.Add($pp.Id)
+    $pp | Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
+    $full = 0
+    for ($i = 0; $i -lt $nseg; $i++) {
+      $rg = & $rangeOf $i
+      $f = & $segFile $i
+      if ((Test-Path $f) -and ((Get-Item $f).Length -eq ($rg.E - $rg.S + 1))) { $full++ }
+    }
+    if ($full -eq $nseg) { $engine = 'parallel' } else { "PARALLEL_FALLBACK: 只完成 $full/$nseg 段，改走窃取调度（已下好的段保留）" }
   }
-  "parts=$parts chunk=$chunk pids=$($curlPids -join ',')"
+
+  if ($engine -ne 'parallel') {
+    # 窃取调度：段是可重入的「起点..终点」，卡住/断了就按已下载字节续传，换下一条路线重排队
+    $queue = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $nseg; $i++) {
+      $rg = & $rangeOf $i
+      $f = & $segFile $i
+      $have = $(if (Test-Path $f) { [int64](Get-Item $f).Length } else { [int64]0 })
+      if ($have -lt ($rg.E - $rg.S + 1)) {
+        [void]$queue.Add([pscustomobject]@{ Index = $i; Start = $rg.S; End = $rg.E; Route = ($i % $pool.Count); Tries = 0 })
+      }
+    }
+    # 并发不是越大越好：先 4 条起步，吞吐涨就加、出现卡住就砍。实测同一节点 16 条并发会被直接重置。
+    $wMax = [math]::Min([math]::Max([int]$parts, 4), 16)
+    $wCur = [math]::Min(4, $wMax)
+    "engine=steal segments=$nseg chunk=$([math]::Round($chunk/1MB,1))MB workers=start$wCur/$wMax pool=$poolNames"
+    $running = @{}
+    $jobId = 0
+    $winKB = 0; $winBase = 0; $winStall = 0
+    $swWin = [Diagnostics.Stopwatch]::StartNew()
+    while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+      while ($running.Count -lt $wCur -and $queue.Count -gt 0) {
+        $seg = $queue[0]; $queue.RemoveAt(0); $jobId++
+        $f = & $segFile $seg.Index
+        $have = $(if (Test-Path $f) { [int64](Get-Item $f).Length } else { [int64]0 })
+        $rs = [int64]($seg.Start + $have)
+        if ($rs -gt $seg.End) { continue }
+        # 从 0 开始时直接写正式分片；只有续传才写 .resume 再追加——少一次文件合并就少一处句柄竞争
+        $tgt = $(if ($have -eq 0) { $f } else { "$f.resume" })
+        $r = $pool[$seg.Route % $pool.Count]
+        $a = @('-sS', '-L', '--fail', '--connect-timeout', '10', '-A', 'Mozilla/5.0', '-r', "$rs-$($seg.End)", '-o', $tgt, '-m', '1800') + $retry
+        if ($r.Proxy) { $a += @('--proxy', $r.Proxy) }
+        $a += $r.Url
+        $lg = Join-Path $dir ("p{0:000}.log" -f $seg.Index)
+        $pr = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $lg -RedirectStandardError ($lg -replace '\.log$', '.err')
+        [void]$pids.Add($pr.Id)
+        $running[$jobId] = [pscustomobject]@{ Id = $jobId; Seg = $seg; File = $f; Resume = $(if ($tgt -eq $f) { $null } else { $tgt }); Proc = $pr; Last = $have; Still = 0 }
+      }
+      Start-Sleep -Milliseconds 500
+      foreach ($k in @($running.Keys)) {
+        $job = $running[$k]
+        $stalled = $false
+        if (-not $job.Proc.HasExited) {
+          $cur = $(if (Test-Path $job.File) { [int64](Get-Item $job.File).Length } else { [int64]0 }) + $(if ($job.Resume -and (Test-Path $job.Resume)) { [int64](Get-Item $job.Resume).Length } else { [int64]0 })
+          if ($cur -le $job.Last) { $job.Still++ } else { $job.Still = 0 }
+          $job.Last = $cur
+          if ($job.Still -lt 12) { continue }   # 6 秒没长进才算卡住（4 秒会误杀慢启动的连接）
+          Stop-Process -Id $job.Proc.Id -Force -ErrorAction SilentlyContinue
+          Wait-Process -Id $job.Proc.Id -Timeout 5 -ErrorAction SilentlyContinue   # 等句柄释放，否则下面合并会撞锁
+          $stalled = $true
+        }
+        if ($job.Resume -and (Test-Path $job.Resume)) {
+          $tries = 0
+          while ($tries -lt 10) {
+            try {
+              $fs = [IO.File]::Open($job.File, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+              $ri = [IO.File]::OpenRead($job.Resume)
+              $ri.CopyTo($fs); $ri.Dispose(); $fs.Dispose()
+              break
+            } catch {
+              Start-Sleep -Milliseconds 300
+              $tries++
+              if ($tries -ge 10) { throw "RESUME_MERGE_FAILED: $($job.Resume) 一直被占用：$($_.Exception.Message)" }
+            }
+          }
+          Remove-Item $job.Resume -Force -ErrorAction SilentlyContinue
+        }
+        $running.Remove($k)
+        if ($stalled) { $stolen++; $winStall++ }
+        $have = $(if (Test-Path $job.File) { [int64](Get-Item $job.File).Length } else { [int64]0 })
+        $need = $job.Seg.End - $job.Seg.Start + 1
+        if ($have -lt $need) {
+          $repairs++
+          if ($job.Seg.Tries -ge 5) { throw "SEGMENT_SHORT: p$($job.Seg.Index) have=$have need=$need（换 5 条路线仍不够）" }
+          $job.Seg.Tries++
+          $job.Seg.Route++
+          [void]$queue.Add($job.Seg)
+        }
+      }
+      if ($swWin.Elapsed.TotalSeconds -ge 3) {
+        $done = 0
+        for ($i = 0; $i -lt $nseg; $i++) {
+          $f = & $segFile $i
+          if (Test-Path $f) { $done += (Get-Item $f).Length }
+        }
+        $rate = [int](($done - $winBase) / 1KB / [math]::Max($swWin.Elapsed.TotalSeconds, 0.1))
+        if ($winKB -gt 0 -and $rate -gt ($winKB * 1.15) -and $wCur -lt $wMax) {
+          $wCur = [math]::Min($wMax, $wCur + 2)
+          "RAMP_UP: $rate KB/s > $winKB KB/s -> workers=$wCur"
+        } elseif ($winStall -ge 2 -and $wCur -gt 2) {
+          $wCur = [math]::Max(2, [int][math]::Floor($wCur / 2))
+          "BACKOFF: 3 秒内卡了 $winStall 段 -> workers=$wCur"
+        }
+        $winKB = $rate; $winBase = $done; $winStall = 0
+        $swWin.Restart()
+      }
+    }
+    $engine = 'steal'
+  }
+
+  $sum = 0
+  for ($i = 0; $i -lt $nseg; $i++) {
+    $rg = & $rangeOf $i
+    $f = & $segFile $i
+    if (-not (Test-Path $f)) { throw "PART_MISSING: $f" }
+    $len = (Get-Item $f).Length
+    if ($len -ne ($rg.E - $rg.S + 1)) { throw "PART_SIZE: $f len=$len need=$($rg.E - $rg.S + 1)" }
+    $sum += $len
+  }
+  if ($sum -ne $total) { throw "PARTS_MISMATCH: sum=$sum total=$total，先修分片再拼" }
+  $fs = [IO.File]::Create($out)
+  for ($i = 0; $i -lt $nseg; $i++) { $ri = [IO.File]::OpenRead((& $segFile $i)); $ri.CopyTo($fs); $ri.Dispose() }
+  $fs.Dispose()
+  $swE.Stop()
+  $segCount = $nseg
+  $parts = 1
+  "engine_done=$engine segments=$nseg bytes=$sum steals=$stolen repairs=$repairs elapsed=$([math]::Round($swE.Elapsed.TotalSeconds,1))s"
+  "assembled=$((Get-Item $out).Length)"
 }
 
 if ($parts -gt 1) {

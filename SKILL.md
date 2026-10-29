@@ -341,27 +341,27 @@ if ($Parts -gt 0) {
 
 判定：只有「完成数 = n/n、三次波动 ≤2×」的档位能胜出；多段必须快过单段 1.25 倍才分段，否则 `$winN=1` 并把倍数写进报告。`$total` 未知时按 64MB 估起点。跳过阶梯是设计里的省时分支，不是漏测。
 
-7. **按胜出组合下载：`$winN=1`、或小资产、或 total 未知时单流一次拿完，否则按 `$winN` 段并发。** 先查盘（分片+成品约 2 倍资产）、每段独立日志、带 `--retry`，`--retry-all-errors` 要 7.71+。
+7. **按胜出组合下载（P2 引擎）：`$winN=1`、小资产、total 未知时单流一次拿完；否则用「自适应段 + 多源 + 工作窃取」调度。** 段大小按单连接实测速度定（每段约 4 秒的活，夹在 2MB–24MB）；段从第 4 步 206 且**速度达标**（≥最快路线的 35%）的前三条路线轮流取；并发从 4 条起步，3 秒窗口里吞吐涨 15% 就加 2 条、卡住 2 段就砍一半（实测 16 条硬上也一样会被节点重置）。某段 6 秒不长进就杀掉、按已下字节续传、换下一条路线重排队——空闲 worker 接手别人卡住的段，这就是窃取。`GHDL_PARALLEL=1` 且 curl ≥7.66 时走单进程 `curl --parallel` 快路径，段不全会自动回落到窃取。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $parts = $winN
 if (-not $parts) { $parts = 1 }
 $vc = $(if ($curlVer -match '^(\d+)\.(\d+)') { [version]"$($Matches[1]).$($Matches[2])" } else { [version]'0.0' })
-$retry = @('--retry','3','--retry-delay','2')
+$retry = @('--retry', '3', '--retry-delay', '2')
 if ($vc -ge [version]'7.71') { $retry += '--retry-all-errors' } else { "RETRY_DEGRADED: curl $curlVer < 7.71，只用 --retry 3 --retry-delay 2" }
 $base = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
-$dir  = Join-Path $base '_dl_parts'
-$out  = Join-Path $base $asset
+$dir = Join-Path $base '_dl_parts'
+$out = Join-Path $base $asset
 New-Item -ItemType Directory $base -Force | Out-Null
-# 小资产、单流足够快、或总字节数未知时都走单流；若是 -Parts 指定却被挡下，说清原因
 if ($Parts -gt 0 -and $winN -gt 1 -and ($total -le 0 -or $total -lt ($ladderMinMB * 1MB))) {
-  "PARTS_IGNORED: 资产 $([math]::Round($total/1MB,1))MB（闸值 ${ladderMinMB}MB）或总字节数未知，分段只会更慢，改走单流"
-  $winN = 1
+  "PARTS_IGNORED: 资产 $([math]::Round($total/1MB,1))MB（闸值 ${ladderMinMB}MB）或总字节数未知，分段只会更慢，走单流"
+  $winN = 1; $parts = 1
 }
+$engine = 'single'; $workers = 0; $segCount = 0; $stolen = 0; $repairs = 0
 if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
   $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-o',$out,'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}|t=%{time_total}') + $retry
-  if ($winProxy) { $a += @('--proxy',$winProxy) }
+  if ($winProxy) { $a += @('--proxy', $winProxy) }
   $a += $winUrl
   $st = (& $curlExe @a | Out-String).Trim()
   "SINGLE exit=$LASTEXITCODE $st"
@@ -370,22 +370,179 @@ if ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $parts -le 1) {
   $parts = 1
 } else {
   if ($dir -match ' ') { throw "SPACE_IN_PATH: $dir 含空格，5.1 的 Start-Process 会拆坏 -o" }
-  $freeGB = [math]::Round((Get-PSDrive (([IO.Path]::GetPathRoot($dir)).TrimEnd('\').TrimEnd(':'))).Free / 1GB, 1)
+  $root = ([IO.Path]::GetPathRoot($dir)).TrimEnd('\').TrimEnd(':')
+  $freeGB = [math]::Round((Get-PSDrive $root).Free / 1GB, 1)
   $needGB = [math]::Round(($total * 2 / 1GB), 1)
   if ($freeGB -lt $needGB) { throw "SPACE_LOW: free=${freeGB}GB need=${needGB}GB" }
-  if ([math]::Floor($total / $parts) -lt 2MB) { $parts = [math]::Max(1, [int][math]::Floor($total / 2MB)) }
+
+  # 路线池：第 4 步实测拿到完整 1MB 且 code=206 的前三条，多源并行从这里轮流取
+  $poolAll = @($results | Where-Object { $_.Code -eq '206' -and $_.Bytes -ge 1048576 } | Sort-Object KBps -Descending)
+  $poolMin = [math]::Max(200, [int](0.35 * [math]::Max([int]$poolAll[0].KBps, 1)))
+  $pool = @($poolAll | Where-Object { $_.KBps -ge $poolMin } | Select-Object -First 3)
+  if ($pool.Count -eq 0) { $pool = @($route) }
+  $poolNames = ($pool | ForEach-Object { $_.Name }) -join ' + '
+
+  # 自适应段大小：按单连接实测速度让每段约 4 秒的活，夹在 2MB..24MB，段数 1..64
+  $perKB = [math]::Max([int]$singleKB, 512)
+  $chunk = [int64]($perKB * 1024 * 4)
+  if ($chunk -lt 2MB) { $chunk = 2MB } elseif ($chunk -gt 24MB) { $chunk = 24MB }
+  $workers = [math]::Min([math]::Max([int]$parts, 2), 16)
+  $nseg = [int][math]::Ceiling($total / [double]$chunk)
+  if ($nseg -lt $workers) { $nseg = $workers }
+  if ($nseg -gt 64) { $nseg = 64 }
+  $chunk = [int64][math]::Ceiling($total / [double]$nseg)
+
   Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory $dir -Force | Out-Null
-  $chunk = [int64][math]::Floor($total / $parts)
-  for ($i = 0; $i -lt $parts; $i++) {
-    $s = [int64]($i * $chunk)
-    $e = $(if ($i -eq $parts - 1) { $total - 1 } else { $s + $chunk - 1 })
-    $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$s-$e",'-o',(Join-Path $dir "p$i.bin"),'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}') + $retry
-    if ($winProxy) { $a += @('--proxy',$winProxy) }
-    $a += $winUrl
-    $curlPids += (Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $dir "p$i.log") -RedirectStandardError (Join-Path $dir "p$i.err")).Id
+  $pids = New-Object System.Collections.ArrayList
+  $swE = [Diagnostics.Stopwatch]::StartNew()
+  $segFile = { param($i) Join-Path $dir ("p{0:000}.bin" -f $i) }
+  $rangeOf = { param($i) $s = [int64]($i * $chunk); [pscustomobject]@{ S = $s; E = $(if ($i -eq $nseg - 1) { $total - 1 } else { $s + $chunk - 1 }) } }
+
+  # fast path：curl >= 7.66 时单进程 --parallel 把所有段一次拉完（无窃取，但进程开销最低）
+  # 注意：不能用 -K 配置文件分组（实测 cfg 里的 next 分隔只跑第一段），必须用 --next 命令行分组。
+  $useParallel = ($env:GHDL_PARALLEL -eq '1') -and ($vc -ge [version]'7.66')
+  if ($useParallel) {
+    $pa = @('--parallel', '--parallel-max', "$workers", '--show-error', '--silent')
+    for ($i = 0; $i -lt $nseg; $i++) {
+      if ($i -gt 0) { $pa += '--next' }
+      $rg = & $rangeOf $i
+      $r = $pool[$i % $pool.Count]
+      $pa += @('-L', '--fail', '--connect-timeout', '10', '-A', 'Mozilla/5.0', '--retry', '3', '--retry-delay', '2')
+      $pa += @('-o', (& $segFile $i), '-r', "$($rg.S)-$($rg.E)")
+      if ($r.Proxy) { $pa += @('--proxy', $r.Proxy) }
+      $pa += $r.Url
+    }
+    $plog = Join-Path $dir 'parallel.log'
+    $pp = Start-Process $curlExe -ArgumentList $pa -NoNewWindow -PassThru -RedirectStandardOutput $plog -RedirectStandardError (Join-Path $dir 'parallel.err')
+    [void]$pids.Add($pp.Id)
+    $pp | Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
+    $full = 0
+    for ($i = 0; $i -lt $nseg; $i++) {
+      $rg = & $rangeOf $i
+      $f = & $segFile $i
+      if ((Test-Path $f) -and ((Get-Item $f).Length -eq ($rg.E - $rg.S + 1))) { $full++ }
+    }
+    if ($full -eq $nseg) { $engine = 'parallel' } else { "PARALLEL_FALLBACK: 只完成 $full/$nseg 段，改走窃取调度（已下好的段保留）" }
   }
-  "parts=$parts chunk=$chunk pids=$($curlPids -join ',')"
+
+  if ($engine -ne 'parallel') {
+    # 窃取调度：段是可重入的「起点..终点」，卡住/断了就按已下载字节续传，换下一条路线重排队
+    $queue = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $nseg; $i++) {
+      $rg = & $rangeOf $i
+      $f = & $segFile $i
+      $have = $(if (Test-Path $f) { [int64](Get-Item $f).Length } else { [int64]0 })
+      if ($have -lt ($rg.E - $rg.S + 1)) {
+        [void]$queue.Add([pscustomobject]@{ Index = $i; Start = $rg.S; End = $rg.E; Route = ($i % $pool.Count); Tries = 0 })
+      }
+    }
+    # 并发不是越大越好：先 4 条起步，吞吐涨就加、出现卡住就砍。实测同一节点 16 条并发会被直接重置。
+    $wMax = [math]::Min([math]::Max([int]$parts, 4), 16)
+    $wCur = [math]::Min(4, $wMax)
+    "engine=steal segments=$nseg chunk=$([math]::Round($chunk/1MB,1))MB workers=start$wCur/$wMax pool=$poolNames"
+    $running = @{}
+    $jobId = 0
+    $winKB = 0; $winBase = 0; $winStall = 0
+    $swWin = [Diagnostics.Stopwatch]::StartNew()
+    while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+      while ($running.Count -lt $wCur -and $queue.Count -gt 0) {
+        $seg = $queue[0]; $queue.RemoveAt(0); $jobId++
+        $f = & $segFile $seg.Index
+        $have = $(if (Test-Path $f) { [int64](Get-Item $f).Length } else { [int64]0 })
+        $rs = [int64]($seg.Start + $have)
+        if ($rs -gt $seg.End) { continue }
+        # 从 0 开始时直接写正式分片；只有续传才写 .resume 再追加——少一次文件合并就少一处句柄竞争
+        $tgt = $(if ($have -eq 0) { $f } else { "$f.resume" })
+        $r = $pool[$seg.Route % $pool.Count]
+        $a = @('-sS', '-L', '--fail', '--connect-timeout', '10', '-A', 'Mozilla/5.0', '-r', "$rs-$($seg.End)", '-o', $tgt, '-m', '1800') + $retry
+        if ($r.Proxy) { $a += @('--proxy', $r.Proxy) }
+        $a += $r.Url
+        $lg = Join-Path $dir ("p{0:000}.log" -f $seg.Index)
+        $pr = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $lg -RedirectStandardError ($lg -replace '\.log$', '.err')
+        [void]$pids.Add($pr.Id)
+        $running[$jobId] = [pscustomobject]@{ Id = $jobId; Seg = $seg; File = $f; Resume = $(if ($tgt -eq $f) { $null } else { $tgt }); Proc = $pr; Last = $have; Still = 0 }
+      }
+      Start-Sleep -Milliseconds 500
+      foreach ($k in @($running.Keys)) {
+        $job = $running[$k]
+        $stalled = $false
+        if (-not $job.Proc.HasExited) {
+          $cur = $(if (Test-Path $job.File) { [int64](Get-Item $job.File).Length } else { [int64]0 }) + $(if ($job.Resume -and (Test-Path $job.Resume)) { [int64](Get-Item $job.Resume).Length } else { [int64]0 })
+          if ($cur -le $job.Last) { $job.Still++ } else { $job.Still = 0 }
+          $job.Last = $cur
+          if ($job.Still -lt 12) { continue }   # 6 秒没长进才算卡住（4 秒会误杀慢启动的连接）
+          Stop-Process -Id $job.Proc.Id -Force -ErrorAction SilentlyContinue
+          Wait-Process -Id $job.Proc.Id -Timeout 5 -ErrorAction SilentlyContinue   # 等句柄释放，否则下面合并会撞锁
+          $stalled = $true
+        }
+        if ($job.Resume -and (Test-Path $job.Resume)) {
+          $tries = 0
+          while ($tries -lt 10) {
+            try {
+              $fs = [IO.File]::Open($job.File, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+              $ri = [IO.File]::OpenRead($job.Resume)
+              $ri.CopyTo($fs); $ri.Dispose(); $fs.Dispose()
+              break
+            } catch {
+              Start-Sleep -Milliseconds 300
+              $tries++
+              if ($tries -ge 10) { throw "RESUME_MERGE_FAILED: $($job.Resume) 一直被占用：$($_.Exception.Message)" }
+            }
+          }
+          Remove-Item $job.Resume -Force -ErrorAction SilentlyContinue
+        }
+        $running.Remove($k)
+        if ($stalled) { $stolen++; $winStall++ }
+        $have = $(if (Test-Path $job.File) { [int64](Get-Item $job.File).Length } else { [int64]0 })
+        $need = $job.Seg.End - $job.Seg.Start + 1
+        if ($have -lt $need) {
+          $repairs++
+          if ($job.Seg.Tries -ge 5) { throw "SEGMENT_SHORT: p$($job.Seg.Index) have=$have need=$need（换 5 条路线仍不够）" }
+          $job.Seg.Tries++
+          $job.Seg.Route++
+          [void]$queue.Add($job.Seg)
+        }
+      }
+      if ($swWin.Elapsed.TotalSeconds -ge 3) {
+        $done = 0
+        for ($i = 0; $i -lt $nseg; $i++) {
+          $f = & $segFile $i
+          if (Test-Path $f) { $done += (Get-Item $f).Length }
+        }
+        $rate = [int](($done - $winBase) / 1KB / [math]::Max($swWin.Elapsed.TotalSeconds, 0.1))
+        if ($winKB -gt 0 -and $rate -gt ($winKB * 1.15) -and $wCur -lt $wMax) {
+          $wCur = [math]::Min($wMax, $wCur + 2)
+          "RAMP_UP: $rate KB/s > $winKB KB/s -> workers=$wCur"
+        } elseif ($winStall -ge 2 -and $wCur -gt 2) {
+          $wCur = [math]::Max(2, [int][math]::Floor($wCur / 2))
+          "BACKOFF: 3 秒内卡了 $winStall 段 -> workers=$wCur"
+        }
+        $winKB = $rate; $winBase = $done; $winStall = 0
+        $swWin.Restart()
+      }
+    }
+    $engine = 'steal'
+  }
+
+  $sum = 0
+  for ($i = 0; $i -lt $nseg; $i++) {
+    $rg = & $rangeOf $i
+    $f = & $segFile $i
+    if (-not (Test-Path $f)) { throw "PART_MISSING: $f" }
+    $len = (Get-Item $f).Length
+    if ($len -ne ($rg.E - $rg.S + 1)) { throw "PART_SIZE: $f len=$len need=$($rg.E - $rg.S + 1)" }
+    $sum += $len
+  }
+  if ($sum -ne $total) { throw "PARTS_MISMATCH: sum=$sum total=$total，先修分片再拼" }
+  $fs = [IO.File]::Create($out)
+  for ($i = 0; $i -lt $nseg; $i++) { $ri = [IO.File]::OpenRead((& $segFile $i)); $ri.CopyTo($fs); $ri.Dispose() }
+  $fs.Dispose()
+  $swE.Stop()
+  $segCount = $nseg
+  $parts = 1
+  "engine_done=$engine segments=$nseg bytes=$sum steals=$stolen repairs=$repairs elapsed=$([math]::Round($swE.Elapsed.TotalSeconds,1))s"
+  "assembled=$((Get-Item $out).Length)"
 }
 ```
 
@@ -495,7 +652,11 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 | 无代理直连 GitHub | 已实测 | 直连被限速约 1.2 MB/s，需镜像/代理 |
 | 有代理时自动复用 | 已实测 | A 路线 range 实测后被选为胜出路线 |
 | 管理员权限 | 不需要 | 只读 HKCU，不改注册表/系统代理 |
-| Python / Node / aria2 / 7z / wget | 不需要 | 只用系统 curl + PowerShell/sha256 工具 || 一次性 runner `scripts/ghdl.ps1`（Windows） | 已实测 | 3 次真实下载全 `DOWNLOAD_VERIFIED_OK`：fzf 1.86MB（单流）、rclone 31.6MB（`-ForceLadder`）、OBS 223MB（`-Parts 16` 走拼装） |
+| Python / Node / aria2 / 7z / wget | 不需要 | 只用系统 curl + PowerShell/sha256 工具 |
+| 一次性 runner `scripts/ghdl.ps1`（Windows） | 已实测 | 多次真实下载全 `DOWNLOAD_VERIFIED_OK`：fzf 1.86MB（单流）、rclone 31.6MB（`-ForceLadder`）、OBS 223MB（`-Parts 16` 分段 + `--parallel` 快路径） |
+| P2 自适应段 + 多源 + 工作窃取（`-Parts N`） | 已实测 | OBS 223.7MB：32.3s（同刻单流 31.2s），`RAMP_UP 4→6→8` / `BACKOFF→4`，`steals=5 repairs=5`，字节精确 |
+| P2 `curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`） | 已实测 | 同资产 31.6s，`engine=parallel segments=18 steals=0`，校验通过；旧写法用 `-K` 配置文件分组只跑第一段，已改 `--next` |
+| 故障注入：下载中杀掉一条 curl | 已实测 | 30.7s 完成，`steals=2 repairs=3` 续传补齐，`DOWNLOAD_VERIFIED_OK` |
 | 一次性 runner `scripts/ghdl.sh`（POSIX） | 部分验证 | 在 Windows Git Bash（MSYS2，sh 5.x）跑通：单流下载 + `PARTS=16` 分段拼装 + SHA256 全对；真实 macOS/Linux、dash/BSD sh **未实测** |
 | 「真零前置」：PATH 只剩系统目录 + 清空 HTTP(S)_PROXY/ALL_PROXY | 已实测（Windows） | 非管理员会话、`PATH=C:\Windows{;\system32;\System32\WindowsPowerShell\v1.0}`，靠端口探测找到 7897，全程 SHA256 校验通过 |
 | frontmatter 最小公共集（只有 name + description） | 已实测 | 严格宿主遇到未知键会整条丢弃技能；触发条件写进 description，`validate.ps1` 只放行这两个键 |
@@ -509,6 +670,8 @@ Remove-Item $tmpTxt -Force -ErrorAction SilentlyContinue
 - **资产名对不上必须 `ASSET_NOT_FOUND` + 候选清单，禁止静默换名。** 实测坏姿势：发现 `...-x64.zip` 不存在后只打印 name/size 就改用 `..._amd64.zip` 继续下，报告里连错误码都没有。
 - **API 200 ≠ 资产名对，也 ≠ 资产可下；API 403 限流不是 NO_ROUTE**（有 total/digest 就继续，缺 total 用 `-r 0-0` 的 `Content-Range` 反推）。
 - **并发不是越多越快。** 实测 16 段 7.7 MB/s 最优、24 段 6.0、32 段 6.3 回落；节点快时 16 段只有 0.72×。每轮现测，别背历史数字。
+- **`curl -K cfg` 里的 `next` 分组不可靠。** 实测配置文件里用 `next` 分隔 4 段，只跑完第一段就退出（exit 0、无报错）；多段并行必须用命令行 `--next` 分组。
+- **卡住判定别设 4 秒。** 慢启动的连接 4 秒没长进就杀，会把好段杀掉重来；6 秒（12 个 500ms tick）才稳。
 - **`Port open: False` 不等于代理已启用，`ProxyServer` 残留值也不等于。** 实测 `ProxyEnable: 0` 仍留着 `127.0.0.1:7897`，此时跑基线只会得到 `bytes=0 code=000`。
 - **忘 `-L` 就只剩 302 和 0 字节**；别用 `-I`/HEAD 判断可下，用 `-r 0-1023` 的 GET；节点可用要 `206`（200 表示忽略 Range 回了整包）。
 - **镜像必须实测，全灭很正常**（6 个里 5 个 TLS 超时）；**镜像「快」可能是回了错误页**：排序先看 `Bytes ≥ 512KB` 再看 KB/s。

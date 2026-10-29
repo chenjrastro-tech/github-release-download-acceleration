@@ -126,6 +126,25 @@ sh scripts/ghdl.sh '<release 直链>'
 
 `scripts/ghdl.ps1` 不是手写的：`scripts/build-runner.ps1` 把 `SKILL.md` 第 0–11 步的代码块拼成它（只替换 URL/输出目录/强制阶梯三处），`validate.ps1` 会比对两者，改了文档不重生成就 FAIL。
 
+### 并发引擎（P2）：自适应段 + 多源 + 工作窃取
+
+- 段大小由单连接实测速度决定（每段约 4 秒的活，夹在 2MB–24MB），不再硬编码 16 段。
+- 路线池只收「回 206 且速度 ≥ 最快路线 35%」的前三条；慢路线混进来会让 1/3 的段轮流卡住。
+- 并发从 4 条起步：3 秒窗口里吞吐涨 15% 就 +2 条，卡住 2 段就砍一半。实测硬上 16 段会被节点重置（同一资产 173s），自适应后 32s。
+- 某段 6 秒不长进就算卡住：杀掉、按已下字节续传、换下一条路线重新排队，空闲 worker 接手——这就是工作窃取。
+- `GHDL_PARALLEL=1` 且 curl ≥ 7.66 时走单进程 `curl --parallel`（命令行 `--next` 分组；实测 `-K` 配置文件里的 `next` 只跑第一段）。
+
+同机实测（2026-10-30，OBS 223.7MB，同一时段、同一节点）：
+
+| 方式 | 耗时 | 说明 |
+| --- | --- | --- |
+| 单流（基线） | 31.2s（7.0 MB/s） | 节点没限速时本来就快 |
+| 自适应窃取 `-Parts 16` | 32.3s | `RAMP_UP 4→6→8`、`BACKOFF→4`，`steals=5 repairs=5` |
+| `--parallel` 快路径 | 31.6s | 18 段一次拉完，`steals=0` |
+| 中途杀掉一条 curl | 30.7s | `steals=2 repairs=3`，续传补齐后校验通过 |
+
+结论：节点不限速时并发不会更快，引擎会自己退回单流；只有单连接被限速时才有收益（历史实测 6.3×）。
+
 **「真零前置」的可验证定义**：PATH 只留系统目录、清空 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`、不登录任何账号、非管理员用户，仍能完成一次真实下载并通过校验。Windows 侧已按这个口径实测通过——非管理员会话、PATH 只剩 `C:\Windows{,\system32,\System32\WindowsPowerShell\v1.0}`，靠端口探测找到本机 7897，最后 SHA256 与 release digest 一致。
 
 ## 5. 输入输出示例
@@ -256,6 +275,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
 ## 变更记录
+
+**0.3.0（2026-10-30）**：P2 并发引擎——自适应段大小（按单连接实测速度）、多源路线池（只收 ≥35% 最快速度的前三条）、工作窃取（卡住就杀掉续传换路线）、自适应并发（4 起步，涨 15% 加 2、卡 2 段砍半）、`curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`）。同机实测：单流 31.2s / 自适应 32.3s / `--parallel` 31.6s / 杀段恢复 30.7s，全部字节精确。
 
 - **2026-10-29（最新）**：发布到 npm，包名 **`github-release-accelerator`**（`0.2.1`）——npm registry 拒绝包名里出现 `download`（`400 That word is not allowed`），所以 npm 发布名去掉该词，仓库名与技能名不变；`cordis.patch.yml` 的 `name` 随之改为包名（`id` 仍是技能名），`validate.ps1` 允许包名与目录名不同。新增市场卡片图标与三张实测截图（`assets/` + `screenshots.json`），PR 条目补 `icon:`。
 - 2026-10-29：打包成可进插件市场的插件包 —— 新增 `package.json`（声明 `dsh.bundle.patch`）、`cordis.patch.yml`、`index.js`（技能 provider，零依赖，把包内 `SKILL.md` 挂进 `ctx.skills`，`source: bundled`、rank 600）。版本号提到 **0.2.0**。技能正文与阈值未变，`validate.ps1` 仍 `VALIDATE_OK`。
