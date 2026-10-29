@@ -308,11 +308,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 
 ## 变更记录
 
-**0.4.1（2026-10-30）**：①单流「三方差一」校验——下完比对响应头 `Content-Length` 与 `total`，不等即 `SIZE_MISMATCH`（短包不再靠运气）；②POSIX 侧补齐孤儿清理、幂等、单流 `-C -` 续传、分段跨进程续传（`<成品>.parts/manifest`）、`FORCE_CLEAN=1`；③回归套件扩到 12 组 34 条（新增直链 404、死代理端口、`-Parts 64` 并发夹取）。
+**0.3.0（2026-10-30）**：第一个可以长期用的版本。仓库内部曾按 P1/P2/P3 拆成 0.3.0/0.4.0/0.4.1 三段编号，但一条都没发布过；为了不跳号，统一收回成 **0.3.0** 一次发。
 
-**0.4.0（2026-10-30）**：P3——①任意直链（不再只认 `github.com/.../releases/download/...`，自建 CDN/GitLab/内网制品库也能用，只做字节校验）；②断点续传 + 幂等（`_dl_parts/manifest.json` 记分段方案，重跑沿用并跳过已下分片；成品已完整则 `ALREADY_DONE`）；③孤儿进程收尾（上次被强杀留下的 curl 先 `ORPHANS_KILLED` 再开工，杜绝双写同一分片）；④逐段强校验（`p000..pN` 每段长度必须等于 `end-start+1`，否则 `SEGMENT_SIZE_MISMATCH` 并保留现场）；⑤退出码语义（只有校验通过才是 0）；⑥`-ForceClean` / `-KeepParts`；⑦离线回归测试 `tests/run-tests.ps1`（9 组场景 27 条断言，本机 18765 端口，不需要外网）。
-
-**0.3.0（2026-10-30）**：P2 并发引擎——自适应段大小（按单连接实测速度）、多源路线池（只收 ≥35% 最快速度的前三条）、工作窃取（卡住就杀掉续传换路线）、自适应并发（4 起步，涨 15% 加 2、卡 2 段砍半）、`curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`）。同机实测：单流 31.2s / 自适应 32.3s / `--parallel` 31.6s / 杀段恢复 30.7s，全部字节精确。
+- **一次性 runner**：新增 `scripts/ghdl.ps1`（由 `scripts/build-runner.ps1` 从 `SKILL.md` 的 12 个代码块生成，`-Check` 可检测文档与成品的漂移）和 `scripts/ghdl.sh`（POSIX）。装好后可以不走 agent 直接命令行跑，参数 `-Url` / `-OutDir` / `-Parts` / `-ForceClean` / `-KeepParts`。
+- **frontmatter 收敛到最小公共集**（只留 `name` / `description`）：严格宿主遇到未知键会整条丢技能；两个阈值搬进正文参数表（`min_size_for_ladder_mb` / `single_conn_fast_kbps`），`validate.ps1` 校验正文表与代码里的 `$ladderMinMB`/`$fastKB` 是否同步。
+- **P2 并发引擎**：按单连接实测速度自适应段大小；多源路线池（只收 ≥35% 最快速度的前三条）；工作窃取（某段卡住就杀掉、换路线、续传重排队）；自适应起并发（4 起步，吞吐涨 15% 加 2、3 秒内卡 2 段砍半）；`curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`）。同机同一资产：单流 31.2s / 自适应 32.3s / `--parallel` 31.6s / 杀段恢复 30.7s，全部字节精确。
+- **P3 可靠性**：任意 https 直链（自建 CDN、GitLab、内网制品库都行，用 1 字节 range 的 `Content-Range` 反推总长，只做字节校验）；断点续传 + 幂等（`_dl_parts/manifest.json` 记住分段方案，重跑沿用并跳过已下分片，成品已完整则 `ALREADY_DONE`）；孤儿进程收尾（先 `ORPHANS_KILLED` 再开工，杜绝两个进程写同一分片——实测写坏过 4.9MB）；逐段强校验（每段长度必须等于 `end-start+1`，否则 `SEGMENT_SIZE_MISMATCH` 并保留现场）；退出码只有真校验通过才是 0；`-ForceClean` / `-KeepParts`。
+- **单流「三方差一」**：下完比对响应头 `Content-Length` 与 `total`，不等即 `SIZE_MISMATCH`（短包不再靠运气）；重定向链上取最后一个 `Content-Length`。
+- **POSIX `ghdl.sh`**：直链、续传（`.parts/manifest`）、幂等、`FORCE_CLEAN=1`、孤儿清理（`pgrep -f`，Windows 上无 `pgrep` 时降级），三级 `sha256sum`/`shasum`/`openssl` 降级。**只做到「Git Bash 跑通 + 部分验证」，真 macOS/Linux 未实测。**
+- **段粒度**：段数上限 64 → 128，让 1–3GB 资产的段大小仍守在 24MB 内。实测：1.2GB Godot 资产 `-Parts 8` → 49 段 / 23.4MB，SHA256 与 digest 一致；本地 1.75GB → 75 段 / 10.8s。
+- **证据与回归**：真零前置实测（PATH 只剩系统目录、清空代理环境变量、非管理员，仍靠端口探测选中代理下载并校验通过）；`tests/run-tests.ps1` 12 组 34 条离线断言（含直链 404、死代理端口、`-Parts 64` 并发夹取），套件开跑前先验明端口上确实是本仓库的 `serve.ps1`，否则明确报错。
 
 - **2026-10-29（最新）**：发布到 npm，包名 **`github-release-accelerator`**（`0.2.1`）——npm registry 拒绝包名里出现 `download`（`400 That word is not allowed`），所以 npm 发布名去掉该词，仓库名与技能名不变；`cordis.patch.yml` 的 `name` 随之改为包名（`id` 仍是技能名），`validate.ps1` 允许包名与目录名不同。新增市场卡片图标与三张实测截图（`assets/` + `screenshots.json`），PR 条目补 `icon:`。
 - 2026-10-29：打包成可进插件市场的插件包 —— 新增 `package.json`（声明 `dsh.bundle.patch`）、`cordis.patch.yml`、`index.js`（技能 provider，零依赖，把包内 `SKILL.md` 挂进 `ctx.skills`，`source: bundled`、rank 600）。版本号提到 **0.2.0**。技能正文与阈值未变，`validate.ps1` 仍 `VALIDATE_OK`。
