@@ -372,6 +372,8 @@ if (-not $repo) {
 - **P3 断言**：直链走 `direct=True`；重跑命中 `ALREADY_DONE` 或 `RESUME_PLAN`；逐段不符必须 `SEGMENT_SIZE_MISMATCH` + 退出码 1 + `PARTS_KEPT`（且不能打印 `DOWNLOAD_VERIFIED_OK`）。
 - **跨平台分发**：Windows 跑 `scripts/ghdl.ps1`，macOS/Linux 跑 `scripts/ghdl.sh`；两边日志都应有 `skip_ladder`/`SKIP_LADDER` 与同一组阈值（100MB / 3072KB/s）。
 - **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟；Windows 上要 `PYTHON=<真实 python3>`（商店版是空壳）。2026-10-30 实测 `TESTS_SH_OK: 23 项通过`，`tests/run-tests-min-shells.sh` 另证 dash/busybox/ksh 跑通 `ghdl-min.sh`。
+- **同一个下载目录里并发两个资产**：分片目录按资产名隔离（`<asset>.parts`），两个资产互不覆盖；孤儿清理也只按该资产的分片目录匹配。
+- **机器上没有 curl.exe**：Windows 走 `Invoke-WebRequest` 单流降级（不选路/不分段/不续传，打印 `IWR_FALLBACK`），POSIX 直接报 `NO_CURL` 停下——`ghdl.sh` 依赖 curl。
 - **收尾**：`7897` 不再监听、无本次 `verge-mihomo` 残留、`ProxyEnable` 与开始时一致。
 - **文件体积**：`(Get-Item SKILL.md).Length` ≤ 65536（上限硬约束）。
 

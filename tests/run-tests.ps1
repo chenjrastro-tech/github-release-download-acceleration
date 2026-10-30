@@ -140,12 +140,12 @@ try {
   $f4 = Join-Path $d4 'big.bin'
   Check ((Get-Item $f4).Length -eq 123456789) '拼装后字节=123456789'
   Check ((Get-FileHash $f4 -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 123456789)) '拼装后 SHA256 正确（跨段无错位）'
-  Check (-not (Test-Path (Join-Path $d4 '_dl_parts'))) '校验通过后分片目录被清掉'
+  Check (-not (Test-Path (Join-Path $d4 'big.bin.parts'))) '校验通过后分片目录被清掉'
 
   # ---------- 5) 续传：预置 manifest + 1 个完整段 + 半个段
   "`n[5] 续传（manifest + 已有分片）"
   $d5 = Join-Path $Work 'resume'
-  $p5 = Join-Path $d5 '_dl_parts'
+  $p5 = Join-Path $d5 'big.bin.parts'
   New-Item -ItemType Directory $p5 -Force | Out-Null
   '{"total":123456789,"chunk":8000000,"nseg":16,"url":"' + "$Base/big.bin" + '","asset":"big.bin"}' |
     Set-Content -LiteralPath (Join-Path $p5 'manifest.json') -Encoding ASCII
@@ -163,7 +163,7 @@ try {
   # ---------- 6) 坏分片：长度对不上必须报 SEGMENT_SIZE_MISMATCH，且保留分片
   "`n[6] 坏分片（长度不符）"
   $d6 = Join-Path $Work 'badseg'
-  $p6 = Join-Path $d6 '_dl_parts'
+  $p6 = Join-Path $d6 'big.bin.parts'
   New-Item -ItemType Directory $p6 -Force | Out-Null
   '{"total":123456789,"chunk":8000000,"nseg":16,"url":"' + "$Base/big.bin" + '","asset":"big.bin"}' |
     Set-Content -LiteralPath (Join-Path $p6 'manifest.json') -Encoding ASCII
@@ -173,7 +173,7 @@ try {
   $r = Invoke-Ghdl @('-Url', "$Base/big.bin", '-OutDir', $d6, '-Parts', '16')
   Check ($r.Code -eq 1) '坏分片 exit=1' "exit=$($r.Code)"
   Check (Has $r.Out 'SEGMENT_SIZE_MISMATCH') '报 SEGMENT_SIZE_MISMATCH'
-  Check (Test-Path (Join-Path $d6 '_dl_parts')) '失败时保留分片以便续传'
+  Check (Test-Path (Join-Path $d6 'big.bin.parts')) '失败时保留分片以便续传'
 
   # ---------- 7) 短包：服务器声明 2MB 只发 700KB，必须由「三方差一」拦下
   "`n[7] 短包"
@@ -242,6 +242,49 @@ try {
   Check ($r.Code -eq 0) 'LOCAL_TARGET 场景 exit=0' "exit=$($r.Code)"
   Check (Has $r.Out 'LOCAL_TARGET') '印出 LOCAL_TARGET'
   Check ((Test-Path (Join-Path $d13 'ok.bin')) -and (Get-Item (Join-Path $d13 'ok.bin')).Length -eq 3145728) '本机目标落盘字节正确'
+
+  # ---------- 14) 同一 OutDir 并发两个资产：分片目录必须按资产隔离（P0 回归）
+  "`n[14] 同一 OutDir 并发两个资产"
+  $d14 = Join-Path $Work 'concurrent'
+  New-Item -ItemType Directory $d14 -Force | Out-Null
+  function Start-Runner($url, $outDir) {
+    # Start-Process 在 5.1 里配合 -RedirectStandardOutput 时 ExitCode 取不到（实测为空），
+    # 这里直接用 Diagnostics.Process 并显式重定向。
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'
+    $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Url "{1}" -OutDir "{2}" -Parts 4' -f $Runner, $url, $outDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    [Diagnostics.Process]::Start($psi)
+  }
+  $pa = Start-Runner "$Base/big.bin" $d14
+  $pb = Start-Runner "$Base/big2.bin" $d14
+  $o14a = $pa.StandardOutput.ReadToEnd() + $pa.StandardError.ReadToEnd()
+  $o14b = $pb.StandardOutput.ReadToEnd() + $pb.StandardError.ReadToEnd()
+  [void]$pa.WaitForExit(300000); [void]$pb.WaitForExit(300000)
+  Check ($pa.ExitCode -eq 0 -and $pb.ExitCode -eq 0) '两个并发下载都 exit=0' "e1=$($pa.ExitCode) e2=$($pb.ExitCode)"
+  $f14a = Join-Path $d14 'big.bin'; $f14b = Join-Path $d14 'big2.bin'
+  $l14a = $(if (Test-Path $f14a) { (Get-Item $f14a).Length } else { -1 })
+  $l14b = $(if (Test-Path $f14b) { (Get-Item $f14b).Length } else { -1 })
+  Check ($l14a -eq 123456789) '并发下 big.bin 字节=123456789' "got=$l14a"
+  Check ($l14b -eq 67108864) '并发下 big2.bin 字节=67108864' "got=$l14b"
+  if ($l14a -eq 123456789) { Check ((Get-FileHash $f14a -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 123456789)) '并发下 big.bin SHA256 正确' }
+  if ($l14b -eq 67108864) { Check ((Get-FileHash $f14b -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 67108864)) '并发下 big2.bin SHA256 正确' }
+  Check ((Test-Path (Join-Path $d14 'big.bin.parts')) -eq $false -and (Test-Path (Join-Path $d14 'big2.bin.parts')) -eq $false) '两个资产的分片目录都已清掉'
+
+  # ---------- 15) 没有 curl.exe：必须降级 Invoke-WebRequest 单流，而不是抛 NO_CURL
+  "`n[15] 无 curl.exe 降级 Invoke-WebRequest"
+  $d15 = Join-Path $Work 'nowcurl'
+  $cmd = "`$env:Path='C:\Windows\System32\WindowsPowerShell\v1.0'; & '$Runner' -Url '$Base/ok.bin' -OutDir '$d15'"
+  $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { $o15 = & powershell -NoProfile -ExecutionPolicy Bypass -Command $cmd 2>&1 | Out-String }
+  finally { $ErrorActionPreference = $prevEap }
+  $c15 = $LASTEXITCODE
+  Check ($c15 -eq 0) 'IWR 降级 exit=0' "exit=$c15"
+  Check (Has $o15 'IWR_FALLBACK') '印出 IWR_FALLBACK'
+  $f15 = Join-Path $d15 'ok.bin'
+  Check ((Test-Path $f15) -and (Get-Item $f15).Length -eq 3145728) 'IWR 落盘字节=3145728'
 } finally {
   if ($ownServer) { Stop-Process -Id $ownServer.Id -Force -ErrorAction SilentlyContinue }
   if (-not $Keep) { Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }

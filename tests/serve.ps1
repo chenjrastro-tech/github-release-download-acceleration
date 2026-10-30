@@ -8,6 +8,7 @@
   路由：
     /ok.bin        3 MB，支持 Range
     /big.bin       123456789 B（非 2 的幂、非段长整数倍），支持 Range
+    /big2.bin      67108864 B（64MB），给「同一 OutDir 并发两个资产」用例
     /nodash.bin    4 MB，Support Range
     /short.bin     声明 2 MB，实际只发 700 KB 就断开（模拟「短包」）
     /norange.bin   1 MB，故意忽略 Range（永远 200 + 全量），模拟不支持分段的服务器
@@ -27,6 +28,7 @@ for ($i = 0; $i -lt $MB; $i++) { $pattern[$i] = [byte](($i * 7 + 3) -band 0xFF) 
 $specs = @{
   '/ok.bin'      = @{ Total = 3145728;   Mode = 'ok' }
   '/big.bin'     = @{ Total = 123456789; Mode = 'ok' }
+  '/big2.bin'    = @{ Total = 67108864;  Mode = 'ok' }
   '/nodash.bin'  = @{ Total = 4194304;   Mode = 'ok' }
   '/short.bin'   = @{ Total = 2097152;   Mode = 'short'; Send = 716800 }
   '/norange.bin' = @{ Total = 1048576;   Mode = 'norange' }
@@ -60,6 +62,10 @@ while ($true) {
     $client = $listener.AcceptTcpClient()
     $stream = $client.GetStream()
     $client.ReceiveTimeout = 15000
+    # 对端静默消失时，write 默认会无限阻塞 -> 整个单线程夹具卡死，后续用例全 000。
+    # 这里给写操作设超时，卡住就丢掉这条连接继续 accept。
+    $client.SendTimeout = 15000
+    $client.NoDelay = $true
 
     # --- 读请求头（直到空行）
     $sb = New-Object System.Text.StringBuilder

@@ -1,5 +1,5 @@
 # 下载器现场：分片目录与未拼装的分片不提交（默认落在 ~/Downloads 或 -OutDir）
-_dl_parts/
+*.parts/
 *.part
 
 # 编辑器 / 操作系统杂物

@@ -56,7 +56,25 @@ if ($onWin) {
 $curlOk = [bool](Get-Command $curlExe -ErrorAction SilentlyContinue)
 $curlVer = $(if ($curlOk) { [string](((& $curlExe -V) -split '\s+')[1]) } else { '(none)' })
 "onWin=$onWin listen=$($listen -join ',') proxyOk=$proxyOk probeSec=$([math]::Round($swP.Elapsed.TotalSeconds,2)) sysProxy=$sysProxy env=$env:HTTPS_PROXY|$env:HTTP_PROXY curl=$curlVer ok=$curlOk"
-if (-not $curlOk) { throw 'NO_CURL: 端口探测/镜像/分段全部不可用；Windows 用 Invoke-WebRequest 单流降级，POSIX 直接停' }
+if (-not $curlOk -and -not $onWin) { throw 'NO_CURL: POSIX 没有 curl（ghdl.sh 依赖 curl），不降级' }
+if (-not $curlOk) {
+  # 没有 curl.exe 的 Windows（Win7 / Server 2016 / 精简镜像）：退化成 Invoke-WebRequest 单流。
+  # 明确降级：不选路、不分段、不续传、拿不到 digest —— 但至少能下完并落盘。
+  "IWR_FALLBACK: 没有 curl.exe，改用 Invoke-WebRequest 单流（不选路/不分段/不续传）"
+  $base = $(if ($OutDir) { $OutDir } else { Join-Path $env:USERPROFILE 'Downloads' })
+  if (-not $asset) { throw 'IWR_NO_ASSET: 直链里取不到文件名，请给 release 资产直链' }
+  New-Item -ItemType Directory -Path $base -Force | Out-Null
+  $out = Join-Path $base $asset
+  $u2 = $(if ($direct) { $u } else { "https://github.com/$repo/releases/download/$tag/$asset" })
+  $iw = @{ Uri = $u2; OutFile = $out; UseBasicParsing = $true; TimeoutSec = 900 }
+  if ($listen.Count -gt 0) { $iw.Proxy = "http://127.0.0.1:$($listen[0])"; "IWR_PROXY: $($iw.Proxy)" }
+  try { Invoke-WebRequest @iw -ErrorAction Stop | Out-Null } catch { throw "IWR_FAILED: $($_.Exception.Message)" }
+  $size = (Get-Item $out).Length
+  $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+  "IWR_GOT: $size 字节 sha256=$sha"
+  "IWR_OK: $out（没有 curl 就取不到 release digest，只保证字节落盘）"
+  return
+}
 function Invoke-Curl([string[]]$a) {
   $o = Join-Path $env:TEMP ("cur_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
   $p = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError "$o.err"
@@ -291,7 +309,10 @@ $vc = $(if ($curlVer -match '^(\d+)\.(\d+)') { [version]"$($Matches[1]).$($Match
 $retry = @('--retry','3','--retry-delay','2')
 if ($vc -ge [version]'7.71') { $retry += '--retry-all-errors' } else { "RETRY_DEGRADED: curl $curlVer < 7.71，只用 --retry 3 --retry-delay 2" }
 $base = $(if ($OutDir) { $OutDir } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads' })
-$dir = Join-Path $base '_dl_parts'
+$safe = ($asset -replace '[\\/:*?"<>|]', '_')
+if (-not $safe) { $safe = 'download' }
+# 分片目录按资产隔离：同一 -OutDir 并发两个文件时，分片不会互相覆盖，孤儿清理也只扫自己那份
+$dir = Join-Path $base ($safe + '.parts')
 $out = Join-Path $base $asset
 New-Item -ItemType Directory $base -Force | Out-Null
 if ($dir -match ' ') { throw "SPACE_IN_PATH: $dir 含空格，5.1 的 Start-Process 会拆坏 -o" }
@@ -527,5 +548,5 @@ Get-ChildItem $env:TEMP -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -like 'ladder_*' -or $_.Name -like 'probe_*' -or $_.Name -like 'meta_*' -or $_.Name -like 'cur_*' -or $_.Name -like 'raw_*' -or $_.Name -like 'ver_*' -or $_.Name -like 'smoke_*' } |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 "7897=$([bool](Test-Port '127.0.0.1' 7897)) corePid=$corePid"
-if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyEnable }
+if ($onWin) { $null = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyEnable }
 ```
