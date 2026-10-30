@@ -70,6 +70,9 @@ macOS 侧实现要点（`scripts/ghdl.sh` 顶部注释同步维护）：
 - 每段下完先核 `end-start+1` 字节，拼装前逐段强校验；缺一字节就 `SEGMENT_SIZE_MISMATCH` 并保留分片，重跑自动续传。
 - `--http2` / `--buffer-size` / `--proxy-http2` 全部先用 `curl --help all` 探测再用（Git Bash 自带的 curl 8.22 既没有 `--buffer-size` 也没编 HTTP/2，硬写参数会直接 exit 2）。
 - 服务器忽略 Range（`code=200`）时立刻 `RANGE_UNSUPPORTED` 降级单流，不死磕分段。
+- 阶梯与 ps1 同口径：1/16 两档各跑三遍、交错执行，取**中位数**再比 1.25 倍（单次 1MB 探针噪声可达 3–10 倍，一遍定胜负会来回翻结论）。
+- 并发与 ps1 同策略：阶梯证明「多段快 ≥2 倍」或单连接被限速时直接拉满；单连接已经够快就先起 8 条，再按 1 秒窗口观察，出现 2 段卡住就停手（`RAMP_UP` / `BACKOFF`）。
+- 进度：每 4 秒一行 `progress=…MB/…MB (…%) running=… rate=…KB/s`，静默超过 15 秒说明卡死。
 - 冒烟按后缀分派：`.zip` → `unzip -tqq`、`.tar.gz/.tgz/.tar` → `tar -tf`、`.exe` 在 macOS 上一律 `smoke=SKIP`（不能执行 Windows 二进制，完整性靠 SHA256）。
 
 ## 拿不到 scripts/ 时的最小版（可整段复制）
@@ -373,6 +376,9 @@ if (-not $repo) {
 - **跨平台分发**：Windows 跑 `scripts/ghdl.ps1`，macOS/Linux 跑 `scripts/ghdl.sh`；两边日志都应有 `skip_ladder`/`SKIP_LADDER` 与同一组阈值（100MB / 3072KB/s）。
 - **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟；Windows 上要 `PYTHON=<真实 python3>`（商店版是空壳）。2026-10-30 实测 `TESTS_SH_OK: 23 项通过`，`tests/run-tests-min-shells.sh` 另证 dash/busybox/ksh 跑通 `ghdl-min.sh`。
 - **同一个下载目录里并发两个资产**：分片目录按资产名隔离（`<asset>.parts`），两个资产互不覆盖；孤儿清理也只按该资产的分片目录匹配。
+- **curl 部分成功会把探针行搞乱**：`out=$(curl … || echo '000|0|0')` 在「收到 700KB 后超时」时会把两行拼在一起，六列格式错位，实测直接把 route 选成错的那条、代理字段串成 `0.0.0.0`。正确写法是 `out=$(curl …) || true` 再取第一行。
+- **串行探测关闭端口在 Windows 上很贵**：`/dev/tcp` 连接失败的握手要 ~2 秒，20 个端口就是 40 秒（本地 64MB 用例从 9.4s 涨到 23.9s 的元凶）。现在改成「全部并行发起，最多等 3 秒，再按优先级挑一个」，macOS 有 `nc -z -w 1` 时几乎是瞬间。
+- **进度采样别用 `wc -c` 逐文件**：分段下载时 16 个文件逐个 `wc` 会被正在写的文件拖住（Windows 共享冲突时还会让 `set -e` 把进度线程直接杀掉），改用一次 `du -sk` 遍历整个分片目录。
 - **机器上没有 curl.exe**：Windows 走 `Invoke-WebRequest` 单流降级（不选路/不分段/不续传，打印 `IWR_FALLBACK`），POSIX 直接报 `NO_CURL` 停下——`ghdl.sh` 依赖 curl。
 - **收尾**：`7897` 不再监听、无本次 `verge-mihomo` 残留、`ProxyEnable` 与开始时一致。
 - **文件体积**：`(Get-Item SKILL.md).Length` ≤ 65536（上限硬约束）。

@@ -35,7 +35,7 @@ function Test-Port([string]$h,[int]$p,[int]$ms = 600) {
   try { $t = $c.BeginConnect($h,$p,$null,$null); if (-not $t.AsyncWaitHandle.WaitOne($ms)) { return $false }; $c.EndConnect($t); return $true }
   catch { return $false } finally { $c.Close() }
 }
-$portList = 7890,7891,7897,7898,1080,10808,10809,2080,8889,20171,8080
+$portList = 7890,7891,7892,7893,7894,7895,7896,7897,7898,7899,1080,1081,10808,10809,2080,8889,20171,8080,8118,9090
 $swP = [Diagnostics.Stopwatch]::StartNew()
 $probe = @()
 foreach ($p in $portList) {

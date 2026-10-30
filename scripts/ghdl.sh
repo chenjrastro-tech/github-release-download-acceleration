@@ -158,27 +158,62 @@ fi
 os=$(uname -s)
 echo "os=$os curl=$CURL_VER http2=$HAS_HTTP2 proxy_http2=$HAS_PROXY_HTTP2 bufsize=$HAS_BUFSIZE ulimit_n=$(ulimit -n 2>/dev/null || echo '?')"
 
-# macOS 用 nc -z（BSD netcat，系统自带），比 curl 起进程快一个数量级；
-# 没有 nc 的环境（部分精简 Linux）退回 curl 连一下。
+# macOS 用 nc -z（BSD netcat，系统自带）；没有 nc 的环境（Git Bash / 精简 Linux）
+# 用 bash 的 /dev/tcp 直接握手。两条都是「连不上立刻返回」，关闭端口不会拖时间。
+# 曾经还有第三条「把端口当 HTTP 代理 curl 一下」的兜底，实测在 Windows 上每个关闭的
+# 端口要 2 秒（20 个端口 = 40 秒白等），而它对「端口在听」没有任何额外判别力，已删除。
+HAS_NC=0
+command -v nc >/dev/null 2>&1 && HAS_NC=1
 port_open() {
   local p=$1
-  if command -v nc >/dev/null 2>&1; then
+  if [ "$HAS_NC" = "1" ]; then
     nc -z -w 1 127.0.0.1 "$p" >/dev/null 2>&1 && return 0
+    return 1
   fi
-  # 没有 nc（Git Bash / 精简 Linux）时用 bash 的 /dev/tcp，只看 TCP 是否握手成功
   # 子 shell 里打开 /dev/tcp：退出即关闭连接。绝不能在主 shell 里 `exec 2>/dev/null`，
   # 那会把整个脚本的 stderr 永久吞掉（本次实测踩过：后面所有报错全部消失）。
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     return 0
   fi
-  # 最后的兜底：把这个端口当 HTTP 代理去连它自己（代理端口对普通 GET 可能回 4xx，能连上就算活）
-  curl -s -o /dev/null --connect-timeout 1 -x "http://127.0.0.1:$p" "http://127.0.0.1:$p/" 2>/dev/null && return 0
   return 1
 }
+# 端口清单按「常见优先级」排（7897 = Clash Verge 默认混合端口，排最前）。
+PORT_ORDER="7897 7890 7891 7898 7899 7892 7893 7894 7895 7896 1080 1081 10808 10809 2080 8889 20171 8080 8118 9090"
+
+# 串行探测在 Windows 上每个「关闭的端口」要 ~2 秒（/dev/tcp 在 MSYS 下握手失败很慢），
+# 20 个端口就是 40 秒。这里并行探测：全部同时发，谁先应答就记下来，最多等 3 秒，
+# 再按优先级从「有应答的端口」里挑一个。macOS/Linux 有 nc 时几乎是瞬间。
+probe_ports() {
+  local pf pids x p i found
+  pf=$(mktemp "${TMPDIR:-/tmp}/ghdlports.XXXXXX") || return 1
+  pids=""
+  for p in $PORT_ORDER; do
+    ( port_open "$p" && printf '%s\n' "$p" >> "$pf" ) &
+    pids="$pids $!"
+  done
+  i=0
+  while [ "$i" -lt 30 ]; do
+    [ -s "$pf" ] && break
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  sleep 0.2
+  for x in $pids; do kill "$x" 2>/dev/null || true; done
+  found=""
+  for p in $PORT_ORDER; do
+    if grep -qx "$p" "$pf" 2>/dev/null; then found=$p; break; fi
+  done
+  rm -f "$pf"
+  printf '%s' "$found"
+}
+
 found_port=""
-for p in 7890 7891 7897 7898 1080 10808 10809 2080 8889 20171 8080; do
-  if port_open "$p"; then found_port=$p; break; fi
-done
+if [ -n "${PROXY:-}" ]; then
+  # 环境变量已经指名代理，没必要再花时间扫本机端口
+  echo "PORT_SCAN_SKIPPED: 环境里已有代理 $PROXY"
+else
+  found_port=$(probe_ports)
+fi
 echo "listen_port=${found_port:-(无)} proxy_env=${PROXY:-(空)}"
 
 http_proxy_url=""
@@ -296,7 +331,9 @@ probe() { # $1=name $2=url $3=proxy(可空)
      -w '%{http_code}|%{size_download}|%{speed_download}')
   if [ -n "${3:-}" ]; then a+=(--proxy "$3"); else a+=(--noproxy '*'); fi
   set -e
-  out=$(curl "${a[@]}" "$2" 2>/dev/null || echo '000|0|0')
+  out=$(curl "${a[@]}" "$2" 2>/dev/null) || true
+  out=$(printf '%s' "$out" | tr -d '\r' | head -n1)
+  [ -n "$out" ] || out='000|0|0'
   printf '%s|%s|%s|%s\n' "$1" "$out" "$2" "${3:-}"
 }
 
@@ -394,7 +431,10 @@ fetch_8m() {
      -w '%{http_code}|%{size_download}|%{speed_download}')
   if [ -n "$win_proxy" ]; then a+=(--proxy "$win_proxy"); else a+=(--noproxy "*"); fi
   set -e
-  curl "${a[@]}" "$win_url" 2>/dev/null || echo '000|0|0'
+  out=$(curl "${a[@]}" "$win_url" 2>/dev/null) || true
+  out=$(printf '%s' "$out" | tr -d '\r' | head -n1)
+  [ -n "$out" ] || out='000|0|0'
+  printf '%s\n' "$out"
 }
 s=$(fetch_8m)
 s_code=$(printf '%s' "$s" | cut -d'|' -f1)
@@ -438,17 +478,39 @@ rung() { # $1=n → "n|kbps|full"
   echo "$n|$(( total_spd / 1024 ))|$full"
 }
 
+# 三遍交错跑 1 段与 16 段，取中位数；完成度取最后一遍的「有效分片数」。
+# 单次 1MB/连接 的测速噪声可达 3-10 倍（同一对源交替出现 48MB/s 与 414MB/s），
+# 只跑一遍会把「16 段其实更快」误判成更慢，反之亦然。
+do_ladder() {
+  r1s=""; r16s=""; f1=0; f16=0; rep=1
+  while [ "$rep" -le 3 ]; do
+    a=$(rung 1); b=$(rung 16)
+    r1s="$r1s $(printf '%s' "$a" | cut -d'|' -f2)"
+    r16s="$r16s $(printf '%s' "$b" | cut -d'|' -f2)"
+    f1=$(printf '%s' "$a" | cut -d'|' -f3)
+    f16=$(printf '%s' "$b" | cut -d'|' -f3)
+    rep=$(( rep + 1 ))
+  done
+  k1=$(median $r1s); k16=$(median $r16s)
+  rung1="1|$k1|$f1"; rung16="16|$k16|$f16"
+  echo "LADDER_DONE: rungs=1/16 passes=3 median1=${k1}KB/s median16=${k16}KB/s full=$f1/$f16"
+}
+
+median() {
+  n=$#
+  [ "$n" -eq 0 ] && { echo 0; return; }
+  printf '%s\n' $* | sort -n | awk -v n="$n" 'NR==int((n+1)/2) { print; exit }'
+}
+
 big_enough=0
 [ "${TOTAL:-0}" -ge $(( LADDER_MIN_MB * 1024 * 1024 )) ] && big_enough=1
 if [ "$range_ok" = "0" ]; then
   echo "SKIP_LADDER: 不支持 Range，单流"
   rung1="1|0|0"; rung16="16|0|0"
 elif [ "$FORCE_LADDER" = "1" ] && [ "${TOTAL:-0}" -gt 0 ]; then
-  rung1=$(rung 1); rung16=$(rung 16)
-  echo "LADDER_DONE: rungs=1/16 passes=1（sh 版只跑一遍）"
+  do_ladder
 elif [ "$big_enough" = "1" ] && [ "$single_kbps" -lt "$FAST_KBPS" ]; then
-  rung1=$(rung 1); rung16=$(rung 16)
-  echo "LADDER_DONE: rungs=1/16 passes=1（sh 版只跑一遍）"
+  do_ladder
 else
   rung1="1|0|0"; rung16="16|0|0"
   tmb=$(awk -v t="${TOTAL:-0}" 'BEGIN{ if (t<=0) print "unknown"; else printf "%.1f", t/1048576 }')
@@ -458,7 +520,7 @@ fi
 k1=$(printf '%s' "$rung1" | cut -d'|' -f2)
 k16=$(printf '%s' "$rung16" | cut -d'|' -f2)
 winN=1
-if [ "$k16" -gt 0 ] && [ "$k1" -gt 0 ] && [ "$k16" -ge $(( k1 * 125 / 100 )) ]; then winN=16; fi
+if [ "$k16" -gt 0 ] && [ "$k1" -gt 0 ] && [ "$k16" -ge $(( k1 * 125 / 100 )) ] && [ "${f16:-0}" -ge 16 ]; then winN=16; fi
 if [ "$PARTS_OVERRIDE" -gt 0 ]; then
   if [ "${TOTAL:-0}" -gt 0 ] && [ "$range_ok" = "1" ]; then winN=$PARTS_OVERRIDE
   else
@@ -467,7 +529,8 @@ if [ "$PARTS_OVERRIDE" -gt 0 ]; then
   fi
 fi
 [ "$range_ok" = "0" ] && winN=1
-echo "winN=$winN"
+win_ratio=$(awk -v a="${k16:-0}" -v b="${k1:-0}" 'BEGIN{ if (b<=0) print "-"; else printf "%.2f", a/b }')
+echo "winN=$winN ratio=${win_ratio}x"
 
 # ---------- 6. 下载 ----------
 sweep_orphans
@@ -554,6 +617,7 @@ dl_segment() { # $1=idx
           kill -9 "$cpid" 2>/dev/null || true
           wait "$cpid" 2>/dev/null || true
           echo "SEG_STALL: p$idx 停滞 ${STALL_SEC}s（$cur 字节）-> 杀进程换源"
+          if [ -n "${Q:-}" ]; then printf x >> "$Q/stalls" 2>/dev/null || true; fi
           break
         fi
       else
@@ -632,12 +696,70 @@ elif [ "$winN" -gt 1 ] && [ "${TOTAL:-0}" -gt 0 ]; then
     done
   }
 
+  # 已落盘字节数：一次 du 遍历整个分片目录，比逐个 wc 便宜得多，也不会因为
+  # 某个正在写的文件暂时拒绝访问而把进度线程卡死。
+  bytes_done() {
+    local k
+    k=$(du -sk "$PARTS_DIR" 2>/dev/null | awk 'NR==1{print $1}')
+    [ -n "${k:-}" ] || k=0
+    printf '%s' $(( k * 1024 ))
+  }
+
   sw=$(date +%s 2>/dev/null || echo 0)
-  w=0
-  while [ $w -lt "$wstart" ]; do worker & echo $! >> "$PIDS"; w=$((w+1)); done
-  wait || true
+  started=0
+  limit=4
+  [ "$wstart" -lt 4 ] && limit=$wstart
+  # 起始并发：阶梯已证明「多段快 ≥2 倍」或单连接明显被限速 -> 直接拉满；
+  # 单连接够快（>= FAST_KBPS）说明链路没按连接限速，先起 8 条看一拍再加，
+  # 避免一上来 16 条把同一条管子切碎反而更慢。
+  if [ "${k16:-0}" -gt 0 ] && [ "${k1:-0}" -gt 0 ] && [ "$k16" -ge $(( k1 * 200 / 100 )) ]; then
+    limit=$wstart
+  elif [ "$single_kbps" -gt 0 ] && [ "$single_kbps" -lt "$FAST_KBPS" ]; then
+    limit=$wstart
+  elif [ "$wstart" -gt 8 ]; then
+    limit=8
+  fi
+  [ "$limit" -gt "$wstart" ] && limit=$wstart
+  wpids=""
+  while [ "$started" -lt "$wstart" ]; do
+    while [ "$started" -lt "$limit" ]; do
+      worker & wp=$!
+      wpids="$wpids $wp"
+      echo "$wp" >> "$PIDS"
+      started=$((started+1))
+    done
+    [ "$limit" -ge "$wstart" ] && break
+    sleep 1
+    stalls=0
+    [ -f "$Q/stalls" ] && stalls=$(wc -c < "$Q/stalls" | tr -d ' ')
+    if [ "${stalls:-0}" -ge 2 ]; then
+      echo "BACKOFF: 1 秒内有 ${stalls} 段卡住 -> 不再加并发（已起 $started）"
+      break
+    fi
+    limit=$(( limit + 4 )); [ "$limit" -gt "$wstart" ] && limit=$wstart
+    echo "RAMP_UP: workers=$limit"
+  done
+
+  # 进度：每 4 秒一行（agent 靠它判断还在动）
+  : > "$Q/busy"
+  (
+    last=0
+    while [ -f "$Q/busy" ]; do
+      sleep 4
+      [ -f "$Q/busy" ] || break
+      d=$(bytes_done 2>/dev/null) || d=0
+      [ -n "$d" ] || d=0
+      pct=0; [ "${TOTAL:-0}" -gt 0 ] && pct=$(( d * 100 / TOTAL ))
+      rate=$(( (d - last) / 4 / 1024 )); last=$d
+      echo "progress=$(( d / 1048576 ))MB/$(( ${TOTAL:-0} / 1048576 ))MB (${pct}%) running=$started rate=${rate}KB/s"
+    done
+  ) &
+  rep_pid=$!
+  for wp in $wpids; do wait "$wp" 2>/dev/null || true; done
+  rm -f "$Q/busy"
+  kill "$rep_pid" 2>/dev/null || true
   ew=$(date +%s 2>/dev/null || echo 0)
-  echo "engine_done=pool segments=$SEG_N workers=$wstart pool=$POOL_N elapsed=$((ew - sw))s"
+  echo "engine_done=pool segments=$SEG_N workers=$started pool=$POOL_N elapsed=$((ew - sw))s"
 
   # ---------- 7. 拼装前逐段强校验 ----------
   bad=""; sum=0; j=0
