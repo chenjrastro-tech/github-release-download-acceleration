@@ -163,10 +163,17 @@ echo "os=$os curl=$CURL_VER http2=$HAS_HTTP2 proxy_http2=$HAS_PROXY_HTTP2 bufsiz
 port_open() {
   local p=$1
   if command -v nc >/dev/null 2>&1; then
-    nc -z -w 1 127.0.0.1 "$p" >/dev/null 2>&1
-  else
-    curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:$p" 2>/dev/null
+    nc -z -w 1 127.0.0.1 "$p" >/dev/null 2>&1 && return 0
   fi
+  # 没有 nc（Git Bash / 精简 Linux）时用 bash 的 /dev/tcp，只看 TCP 是否握手成功
+  # 子 shell 里打开 /dev/tcp：退出即关闭连接。绝不能在主 shell 里 `exec 2>/dev/null`，
+  # 那会把整个脚本的 stderr 永久吞掉（本次实测踩过：后面所有报错全部消失）。
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+    return 0
+  fi
+  # 最后的兜底：把这个端口当 HTTP 代理去连它自己（代理端口对普通 GET 可能回 4xx，能连上就算活）
+  curl -s -o /dev/null --connect-timeout 1 -x "http://127.0.0.1:$p" "http://127.0.0.1:$p/" 2>/dev/null && return 0
+  return 1
 }
 found_port=""
 for p in 7890 7891 7897 7898 1080 10808 10809 2080 8889 20171 8080; do

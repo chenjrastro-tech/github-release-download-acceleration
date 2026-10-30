@@ -3,7 +3,7 @@
 #   windows job     : scripts/validate.ps1 → scripts/build-runner.ps1 -Check → tests/run-tests.ps1
 #                     （37 条断言，Windows PowerShell 5.1；套件自己用 powershell.exe 起 tests/serve.ps1 假服务器）
 #   macos/linux job : bash -n scripts/ghdl.sh → PYTHON=python3 bash tests/run-tests-sh.sh
-#                     （17 条断言；套件自己用 python3 起 tests/serve.py 假服务器）
+#                     （18 条断言；套件自己用 python3 起 tests/serve.py 假服务器）
 #
 # 两个套件都只连 127.0.0.1 上的假服务器，所以这里刻意没有 npm install / pip install 之类的步骤；
 # 唯一的外部网络请求是 actions/checkout 取代码本身。
@@ -112,7 +112,7 @@ jobs:
         shell: bash
         run: bash -n scripts/ghdl.sh
 
-      # 17 条断言：单流 / 8 段 64MB / 续传 / 无 Range / 404 / 截断包 / P2SP 双源 / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟
+      # 18 条断言：单流 / 8 段 64MB / 续传 / 无 Range / 404 / 截断包 / P2SP 双源 / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟
       # 套件缺 curl 或 python3 时会打印 SKIP 并 exit 0，所以额外断言 TESTS_SH_OK 真的出现
       - name: 离线回归（run-tests-sh.sh）
         shell: bash

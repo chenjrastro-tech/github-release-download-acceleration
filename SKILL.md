@@ -63,7 +63,7 @@ sh 侧同时接受与 ps1 对齐的命令行选项（优先于同名环境变量
 
 macOS 侧实现要点（`scripts/ghdl.sh` 顶部注释同步维护）：
 
-- 端口探测用 `nc -z -w 1 127.0.0.1 <port>`，没有 `nc` 回退 `curl --connect-timeout 1`；不用 `/dev/tcp`（dash/老 bash 下不可用）。
+- 端口探测顺序：`nc -z` → bash `/dev/tcp`（Git Bash 没 `nc`）→ `curl -x` 当代理试连；只 `curl http://端口` 会误判未开。
 - 开头 `ulimit -n 4096`，抬不上去就打印 `ULIMIT_SKIP` 继续跑，不中断。
 - SHA256 降级链：`openssl dgst -sha256 -r` → `shasum -a 256` → `sha256sum`，结果必须是 64 位十六进制，否则 `NO_HASH_TOOL`。
 - 并发引擎用「命名队列文件 + `mkdir` 原子锁」，不用 `xargs -P`：`xargs` 做不了「单段 6 秒卡死 → 杀掉 → 续传 → 换源」这套自愈。
@@ -832,7 +832,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - **限速节点分支**：只跑 1/16 两档、每档三遍，逐档输出「完成 n/n」、中位与 min–max，最后 `LADDER_DONE: … winN=…`；不出现 4 段档。
 - **P3 断言**：直链走 `direct=True`；重跑命中 `ALREADY_DONE` 或 `RESUME_PLAN`；逐段不符必须 `SEGMENT_SIZE_MISMATCH` + 退出码 1 + `PARTS_KEPT`（且不能打印 `DOWNLOAD_VERIFIED_OK`）。
 - **跨平台分发**：Windows 跑 `scripts/ghdl.ps1`，macOS/Linux 跑 `scripts/ghdl.sh`；两边日志都应有 `skip_ladder`/`SKIP_LADDER` 与同一组阈值（100MB / 3072KB/s）。
-- **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟；Windows 上跑要给 `PYTHON=<真实 python3>`（应用商店的 `python3` 是空壳）。2026-10-30 在 Git Bash 上实测 `TESTS_SH_OK: 17 项通过`。
+- **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟；Windows 上跑要给 `PYTHON=<真实 python3>`（应用商店的 `python3` 是空壳）。2026-10-30 在 Git Bash 上实测 `TESTS_SH_OK: 18 项通过`。
 - **收尾**：`7897` 不再监听、无本次 `verge-mihomo` 残留、`ProxyEnable` 与开始时一致。
 - **文件体积**：`(Get-Item SKILL.md).Length` ≤ 65536（上限硬约束）。
 
@@ -841,7 +841,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 | 能力 | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | `scripts/ghdl.ps1`（生成物） | 已实测：fzf 1.86MB / OBS 213MB / rclone 31.6MB / Godot 1.2GB，含 `-Parts`、`-ForceClean`、续传、截断、无 Range、404 | 不适用（PowerShell 5.1 专属） | 不适用 |
-| `scripts/ghdl.sh`（手写） | 已实测：Git Bash 上 sh 套件 17 条全过 | 已实测：GitHub Actions `macos-latest`（bash 3.2 + BSD 工具）sh 套件 17 条全过 | 已实测：GitHub Actions `ubuntu-latest` sh 套件 17 条全过 |
+| `scripts/ghdl.sh`（手写） | 已实测：Git Bash 上 sh 套件 18 条全过 | 已实测：GitHub Actions `macos-latest`（bash 3.2 + BSD 工具）sh 套件 18 条全过 | 已实测：GitHub Actions `ubuntu-latest` sh 套件 18 条全过 |
 | 环境探测（端口/代理/内核） | 已实测 | 已实测（CI，`nc` 分支） | 已实测（CI） |
 | 三重校验（字节 + SHA256 + 冒烟） | 已实测 | 部分：字节校验已实测，`openssl`/`shasum` 分支仅 CI 未覆盖 digest | 同上 |
 

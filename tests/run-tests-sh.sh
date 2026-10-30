@@ -167,6 +167,10 @@ $OUT
 EOF
 if [ $RC -eq 0 ] && [ -n "$KEPT" ] && [ -d "$KEPT" ]; then ok "临时目录被保留（${KEPT}）"; rm -rf "$KEPT"; else bad "KEEP_TMP" "rc=$RC kept=$KEPT"; fi
 
+echo "[13] 环境里残留死代理（HTTP_PROXY=127.0.0.1:1）不影响本机目标"
+OUT=$(run "$WORK/t13" HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 -- "$BASE/ok.bin"); RC=$?
+if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t13/ok.bin" 2>/dev/null | tr -d ' ')" = 3145728 ]; then ok "死代理被绕过"; else bad "死代理" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; fi
+
 echo "[12] 未知后缀不因冒烟失败"
 OUT=$(run "$WORK/t12" SMOKE=1 -- "$BASE/ok.bin"); RC=$?
 if [ $RC -eq 0 ] && printf '%s' "$OUT" | grep -qE 'smoke=(SKIP|ok)'; then ok "冒烟对 .bin 走 SKIP 不误报"; else bad "后缀冒烟" "rc=$RC"; printf '%s\n' "$OUT" | tail -3; fi
