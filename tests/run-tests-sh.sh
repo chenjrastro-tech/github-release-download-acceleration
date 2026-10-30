@@ -47,12 +47,12 @@ run() {  # run <outdir> <env...> -- <url>
   while [ "$1" != "--" ]; do envs+=("$1"); shift; done
   shift
   mkdir -p "$out"
-  env OUTDIR="$out" SMOKE=0 KEEP_TMP=0 "${envs[@]}" bash "$RUNNER" "$1" 2>&1
+  env OUTDIR="$out" SMOKE=0 KEEP_TMP=0 ${envs[@]+"${envs[@]}"} bash "$RUNNER" "$1" 2>&1
 }
 
 echo "[1] 单流 3MB"
 OUT=$(run "$WORK/t1" -- "$BASE/ok.bin"); RC=$?
-if [ $RC -eq 0 ] && has "$OUT" "SINGLE exit=0" && has "$OUT" "size=3145728"; then ok "单流 + 字节"; else bad "单流 + 字节" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; fi
+if [ $RC -eq 0 ] && has "$OUT" "SINGLE exit=0" && has "$OUT" "size=3145728"; then ok "单流 + 字节"; else bad "单流 + 字节" "rc=$RC"; printf '%s\n' "$OUT" | tail -20; fi
 if [ -f "$WORK/t1/ok.bin" ] && [ "$(wc -c <"$WORK/t1/ok.bin")" -eq 3145728 ]; then ok "落盘 3,145,728 字节"; else bad "落盘字节"; fi
 
 echo "[2] 分段 8 段 64MB"
@@ -154,7 +154,7 @@ if [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && has "$OUT2" "ALREADY_DONE"; then ok "第�
 
 echo "[11] KEEP_TMP=1 保留现场"
 OUT=$(run "$WORK/t11" KEEP_TMP=1 -- "$BASE/ok.bin"); RC=$?
-KEPT=$(printf '%s\n' "$OUT" | sed -n 's/^TMPD_KEPT=//p' | head -1)
+KEPT=$(printf '%s\n' "$OUT" | awk -F= '/^TMPD_KEPT=/{print $2; exit}')
 if [ $RC -eq 0 ] && [ -n "$KEPT" ] && [ -d "$KEPT" ]; then ok "临时目录被保留（$KEPT）"; rm -rf "$KEPT"; else bad "KEEP_TMP" "rc=$RC kept=$KEPT"; fi
 
 echo "[12] 未知后缀不因冒烟失败"
