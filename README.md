@@ -139,6 +139,20 @@ sh scripts/ghdl.sh '<release 直链>' -o /tmp/dl -p 16      # 选项与环境变
 sh scripts/ghdl.sh --help                                  # 全部选项
 ```
 
+### 两端参数对照（P1-c）
+
+| 语义 | Windows `ghdl.ps1` | macOS / Linux `ghdl.sh` | 备注 |
+|---|---|---|---|
+| 输出目录 | `-OutDir <dir>` | `-o, --outdir <dir>` | 默认 `~/Downloads` |
+| 并发段数 | `-Parts N` | `-p, --parts N` | `0` = 按单连接速度自适应 |
+| 清现场重下 | `-ForceClean` | `--force-clean` | 连旧分片一起删 |
+| 强制阶梯 | `-ForceLadder` | `--force-ladder` | 跳过「单连接够快就单流」 |
+| 保留现场 | `-KeepParts` | `--keep-tmp` | 排错时看分片与日志 |
+| 冒烟 | **恒定开启** | `--smoke 0\|1` | ps1 故意不给关闭开关：`SMOKE_FAILED` 必须看得见 |
+| 帮助 | `-?` / `Get-Help` | `-h, --help` | |
+
+选择器（代理、镜像、并发档）两端都不需要用户传参：都由第 4–6 步的实测自己决定。
+
 只有 `SKILL.md`、没有 `scripts/`（raw 又被墙）时，用 **最小版**：`SKILL.md` 里「拿不到 scripts/ 时的最小版」一节内联了完整脚本（86 行、只依赖 curl、会分段+续传+校验），
 也单独放在 `scripts/ghdl-min.sh`；`validate.ps1` 会逐字比对两处，改一边不改另一边直接 FAIL。
 
