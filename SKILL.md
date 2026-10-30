@@ -368,6 +368,7 @@ echo "MIN_OK: $dst ($got 字节)"
 - **跨平台分发**：Windows 跑 `scripts/ghdl.ps1`，macOS/Linux 跑 `scripts/ghdl.sh`；两边日志都应有 `skip_ladder`/`SKIP_LADDER` 与同一组阈值（100MB / 3072KB/s）。
 - **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/死代理/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟/故障注入；Windows 上要 `PYTHON=<真实 python3>`（商店版是空壳）。2026-10-30 实测 `TESTS_SH_OK: 23 项通过`，`tests/run-tests-min-shells.sh` 另证 dash/busybox/ksh 跑通 `ghdl-min.sh`。
 - **故障注入（离线、确定性）**：`tests/serve.py` 提供 403 / 503+`Retry-After` / 429 / 谎报 416 / 302→404 五类端点，`tests/run-tests-sh.sh` 每类一条断言：403/404 非零退出且目标文件不残留，503/429 退避重试后成功，谎报 416 按 `RANGE_UNSUPPORTED` 降级。首跑就抓到真 bug：503 的 11 字节响应体被当成资产 total（`SIZE_MISMATCH: total=11`）；复跑必须 `TESTS_SH_OK` 且日志不再出现 `SIZE_MISMATCH`。
+- **本地基准（入库）**：`powershell -NoProfile -ExecutionPolicy Bypass -File tests\bench.ps1 -Runs 3` 必须 exit 0 并打印 `BENCH: asset=… single=… segments16=… ratio=…x`；回环下 ratio 通常 <1（多段只是多付开销），这条是把「不限速时该回退单流」的判据留在 CI 里，不是加速比证据。
 - **同一个下载目录里并发两个资产**：分片目录按资产名隔离（`<asset>.parts`），两个资产互不覆盖；孤儿清理也只按该资产的分片目录匹配。
 - **curl 部分成功会把探针行搞乱**：`out=$(curl … || echo '000|0|0')` 在「收到 700KB 后超时」时会把两行拼在一起，六列格式错位，实测直接把 route 选成错的那条、代理字段串成 `0.0.0.0`。正确写法是 `out=$(curl …) || true` 再取第一行。
 - **串行探测关闭端口在 Windows 上很贵**：`/dev/tcp` 连接失败的握手要 ~2 秒，20 个端口就是 40 秒（本地 64MB 用例从 9.4s 涨到 23.9s 的元凶）。现在改成「全部并行发起，最多等 3 秒，再按优先级挑一个」，macOS 有 `nc -z -w 1` 时几乎是瞬间。

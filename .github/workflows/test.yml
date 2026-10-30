@@ -77,6 +77,13 @@ jobs:
       - name: 离线回归（run-tests.ps1）
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+      # 本地确定性基准（不碰外网）：同一资产「强制单流」vs「强制 16 段」，各 Runs 遍取中位数。
+      # 本地回环没有每连接限速，16 段必然更慢——这一步把「不限速时该回退单流」的判据留在 CI 里，
+      # 不再只靠文档声明。脚本只打印 BENCH/BENCH_VERDICT，永远 exit 0。
+      - name: 本地基准（单流 vs 16 段，确定性）
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests\bench.ps1 -Runs 2
 
   # ------------------------------------------------------------ macOS / Linux
   posix:

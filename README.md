@@ -189,6 +189,23 @@ sh scripts/ghdl.sh --help                                  # 全部选项
 
 **「真零前置」的可验证定义**：PATH 只留系统目录、清空 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`、不登录任何账号、非管理员用户，仍能完成一次真实下载并通过校验。Windows 侧已按这个口径实测通过——非管理员会话、PATH 只剩 `C:\Windows{,\system32,\System32\WindowsPowerShell\v1.0}`，靠端口探测找到本机 7897，最后 SHA256 与 release digest 一致。
 
+### 本地基准（入库、可复跑）
+
+`tests\bench.ps1` 用 `tests/serve.ps1` 起本地假服务器，对同一资产跑「强制单流」与「强制 16 段」各 N 遍取中位数，读 runner 的 `RESULT_JSON`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\bench.ps1 -Runs 3
+```
+
+2026-10-31 本机实测（`/big.bin` 123,456,789 字节，回环地址）：
+
+| 方式 | 中位耗时 | 中位速度 | 相对单流 |
+| --- | --- | --- | --- |
+| 单流 | 0.3 s | 392.5 MB/s | 1.00× |
+| 16 段 | 1.1 s | 107.0 MB/s | **0.27×** |
+
+**怎么读这组数**：回环没有「每连接限速」，16 条连接只是把同一块内存带宽切碎，还要多付 16 次进程/哈希开销——所以本地多段必然更慢，这正是「不限速时必须回退单流」的判据。它证明的是**开销上界**，不能拿来当公网加速比；公网数字见下面「实测对比」，且节点状态每天不同。
+
 ## 5. 输入输出示例
 
 **输入**：一个 GitHub release 直链或 tag 页；可选目标目录。
