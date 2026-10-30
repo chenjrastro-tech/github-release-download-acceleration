@@ -227,6 +227,21 @@ try {
   $m = [regex]::Match($r.Out, 'workers=(\d+)')
   Check ($m.Success -and [int]$m.Groups[1].Value -le 16) '并发被夹到 ≤16' "workers=$($m.Groups[1].Value)"
   Check ((Get-Item (Join-Path $d12 'big.bin')).Length -eq 123456789) '字节仍精确'
+  # ---------- 13) 本机目标 + 死代理：必须走直连、印 LOCAL_TARGET，且字节正确
+  "`n[13] 本机目标跳过代理（死代理环境）"
+  $d13 = Join-Path $Work 'localdirect'
+  $o1 = $env:HTTP_PROXY; $o2 = $env:HTTPS_PROXY
+  try {
+    $env:HTTP_PROXY = 'http://127.0.0.1:1'
+    $env:HTTPS_PROXY = 'http://127.0.0.1:1'
+    $r = Invoke-Ghdl @('-Url', "$Base/ok.bin", '-OutDir', $d13)
+  } finally {
+    $env:HTTP_PROXY = $o1
+    $env:HTTPS_PROXY = $o2
+  }
+  Check ($r.Code -eq 0) 'LOCAL_TARGET 场景 exit=0' "exit=$($r.Code)"
+  Check (Has $r.Out 'LOCAL_TARGET') '印出 LOCAL_TARGET'
+  Check ((Test-Path (Join-Path $d13 'ok.bin')) -and (Get-Item (Join-Path $d13 'ok.bin')).Length -eq 3145728) '本机目标落盘字节正确'
 } finally {
   if ($ownServer) { Stop-Process -Id $ownServer.Id -Force -ErrorAction SilentlyContinue }
   if (-not $Keep) { Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }
