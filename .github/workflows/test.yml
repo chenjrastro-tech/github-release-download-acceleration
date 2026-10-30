@@ -1,0 +1,121 @@
+# 三平台离线回归 —— 只跑仓库自带的本地套件，不装依赖、不访问外网。
+#
+#   windows job     : scripts/validate.ps1 → scripts/build-runner.ps1 -Check → tests/run-tests.ps1
+#                     （37 条断言，Windows PowerShell 5.1；套件自己用 powershell.exe 起 tests/serve.ps1 假服务器）
+#   macos/linux job : bash -n scripts/ghdl.sh → PYTHON=python3 bash tests/run-tests-sh.sh
+#                     （17 条断言；套件自己用 python3 起 tests/serve.py 假服务器）
+#
+# 两个套件都只连 127.0.0.1 上的假服务器，所以这里刻意没有 npm install / pip install 之类的步骤；
+# 唯一的外部网络请求是 actions/checkout 取代码本身。
+#
+# 两个 job 都在 checkout 之后先跑一次「行尾归一」：Git for Windows 默认 core.autocrlf=true，
+# 会把仓库里 LF 的 .sh 落成 CRLF；这里按 blob 重新落盘，避免 CI 红在换行上而不是红在代码上。
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------- Windows
+  windows:
+    name: Windows / PowerShell 5.1 离线回归
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 单元素矩阵：以后加 windows-2022 / windows-2025 只改这一行，steps 不用动
+        os: [windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 行尾卫生：Git for Windows 默认 core.autocrlf=true 会把 .sh 落成 CRLF（仓库 blob 里是 LF），
+      # 那样 validate.ps1 会报「ghdl.sh 含 CRLF，POSIX 下会报 bad interpreter」。
+      # 这里把工作区按 blob 重新落盘 —— 只改 CI 里的临时工作区，不动仓库内容；
+      # 如果谁真的把 CRLF 提交进了 blob，这一步救不了，validate.ps1 照样会红。
+      - name: 行尾归一（core.autocrlf=false 后重新落盘）
+        shell: powershell
+        run: |
+          Write-Host ("core.autocrlf before: [" + (git config --get core.autocrlf) + "]")
+          git config core.autocrlf false
+          git checkout -- .
+          git ls-files --eol -- scripts/ghdl.sh tests/run-tests-sh.sh
+
+      # 排查用：CI 上到底是哪个 powershell.exe / curl，和本机对不上时先看这里
+      - name: 环境自述
+        shell: powershell
+        run: |
+          Write-Host "=== PowerShell ==="
+          Write-Host ("PowerShell " + $PSVersionTable.PSVersion.ToString())
+          Write-Host ("powershell.exe -> " + (Get-Command powershell.exe).Source)
+          Write-Host "=== curl ==="
+          if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+            Write-Host (curl.exe --version | Select-Object -First 1)
+          } else {
+            Write-Host "curl.exe not found (tests/run-tests.ps1 needs it)"
+          }
+          Write-Host "=== git ==="
+          git --version
+
+      # 仓库自检：frontmatter / 参数表 / 代码块语法 / 文档一致性（成功输出 VALIDATE_OK）
+      - name: 仓库自检（validate.ps1）
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
+
+      # 一次性 runner scripts\ghdl.ps1 必须与 SKILL.md 的代码块同步（成功输出 GENERATE_OK）
+      - name: runner 与 SKILL.md 同步（build-runner -Check）
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-runner.ps1 -Check
+
+      # 37 条断言：单流 / 幂等 / 强制重下 / 16 段 / 续传 / 坏分片 / 短包 / 无 Range / 404 / 死代理 / 并发夹取 / 本机目标
+      - name: 离线回归（run-tests.ps1）
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+
+  # ------------------------------------------------------------ macOS / Linux
+  posix:
+    name: ${{ matrix.os }} / POSIX 离线回归
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 行尾卫生：checkout 若按 core.autocrlf=true 落成 CRLF，bash 会把脚本读炸
+      # （`set -u` 变成 `set -u\r`）。按仓库 blob 里的 LF 重新落盘，只改 CI 临时工作区。
+      - name: 行尾归一（core.autocrlf=false 后重新落盘）
+        shell: bash
+        run: |
+          echo "core.autocrlf before: [$(git config --get core.autocrlf || true)]"
+          git config core.autocrlf false
+          git checkout -- .
+          git ls-files --eol -- scripts/ghdl.sh tests/run-tests-sh.sh
+
+      # 排查用：bash 是 3.2(BSD) 还是 5.x(GNU)、curl 链的是 LibreSSL 还是 OpenSSL —— 先看这里
+      - name: 环境自述（bash / curl / python3 版本）
+        shell: bash
+        run: |
+          echo "=== bash ===";     bash --version
+          echo "=== curl ===";     curl --version
+          echo "=== python3 ===";  python3 --version
+          echo "=== uname ===";    uname -a
+
+      # runner 是纯 bash 脚本：新机器上最先炸的通常是语法 / 换行（CRLF）
+      - name: 语法检查（bash -n scripts/ghdl.sh）
+        shell: bash
+        run: bash -n scripts/ghdl.sh
+
+      # 17 条断言：单流 / 8 段 64MB / 续传 / 无 Range / 404 / 截断包 / P2SP 双源 / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟
+      # 套件缺 curl 或 python3 时会打印 SKIP 并 exit 0，所以额外断言 TESTS_SH_OK 真的出现
+      - name: 离线回归（run-tests-sh.sh）
+        shell: bash
+        run: |
+          PYTHON=python3 bash tests/run-tests-sh.sh | tee "$RUNNER_TEMP/run-tests-sh.log"
+          grep -q 'TESTS_SH_OK:' "$RUNNER_TEMP/run-tests-sh.log"
