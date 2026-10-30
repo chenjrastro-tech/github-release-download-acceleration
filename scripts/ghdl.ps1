@@ -10,6 +10,7 @@
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -Parts 16          # 手动指定并发段数（诊断/复现用）
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -ForceClean        # 删旧分片/旧输出，强制重下
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -KeepParts         # 校验通过也保留分片（排查用）
+    powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -NoKernelPool      # 分段池不加本机内核（默认加）
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -Sha256 '<release 页上的 sha256>'   # API 限流拿不到 digest 时手动给
 
   幂等：目标已存在且字节/SHA256 都对 → 直接 ALREADY_DONE 跳过；中断后重跑 → 按 manifest 沿用分段续传。
@@ -23,6 +24,7 @@ param(
   [switch]$ForceLadder,
   [switch]$ForceClean,
   [switch]$KeepParts,
+  [switch]$NoKernelPool,
   [int]$Parts = 0,
 [string]$Sha256 = ''
 )
@@ -93,10 +95,23 @@ if (-not $curlOk) {
   "IWR_OK: $out（没有 curl 就取不到 release digest，只保证字节落盘）"
   return
 }
-function Invoke-Curl([string[]]$a) {
+function ConvertTo-ArgString([string[]]$a) {
+  # Windows PowerShell 5.1 的 Start-Process -ArgumentList 只是用空格把数组拼成一个命令行，
+  # 不会替参数加引号；-o "D:\a b\c" 会被 curl 拆成两个参数。这里按 Windows 命令行规则手工转义。
+  $parts = foreach ($x in $a) {
+    $s = [string]$x
+    if ($s -match '[\s"]') {
+      $s = $s -replace '"', '\"'
+      if ($s -match '\\+$') { $s += '\' }
+      '"' + $s + '"'
+    } else { $s }
+  }
+  return ($parts -join ' ')
+}
+function Invoke-Curl([string[]]$a,[int]$timeoutMs = 180000) {
   $o = Join-Path $env:TEMP ("cur_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-  $p = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError "$o.err"
-  if (-not $p.WaitForExit(180000)) { $p.Kill() }
+  $p = Start-Process $curlExe -ArgumentList (ConvertTo-ArgString $a) -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError "$o.err"
+  if (-not $p.WaitForExit($timeoutMs)) { $p.Kill(); $p.WaitForExit() }
   $out = ((Get-Content $o -Raw -ErrorAction SilentlyContinue) + '').Trim()
   $err = ((Get-Content "$o.err" -Raw -ErrorAction SilentlyContinue) + '').Trim()
   Remove-Item $o,"$o.err" -Force -ErrorAction SilentlyContinue
@@ -176,7 +191,7 @@ if ($Sha256) { $want = ([string]$Sha256).Trim().ToLower(); if ($want) { "want_ov
 if (-not $direct) { $u = "https://github.com/$repo/releases/download/$tag/$asset" }
 $mirrors = @()
 if (-not $direct) { $mirrors = @('https://ghfast.top','https://ghproxy.net','https://gh-proxy.com','https://hk.gh-proxy.com','https://github.moeyy.xyz','https://gh.llkk.cc','https://ghproxy.cc') }
-$minBytes = $(if ($direct) { 1 } else { 524288 })
+$minBytes = $(if ($direct) { 1 } elseif ($total -gt 0) { [math]::Min([int64]524288, $total) } else { 524288 })
 $hostName = ''; try { $hostName = ([uri]$u).Host } catch { }
 $isLocal = ($hostName -match '^(?i)(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)')
 if ($isLocal) { "LOCAL_TARGET: 目标是本机/内网地址（$hostName），跳过代理与公共镜像——它们只会把请求绕远，还可能在中途断掉；直接走原地址" }
@@ -192,7 +207,7 @@ $jobs = @(foreach ($p in $probes) {
   if ($p.Proxy) { $a += @('--proxy', $p.Proxy) } else { $a += @('--noproxy', '*') }
   $a += $p.Url
   [pscustomobject]@{ Name = $p.Name; Url = $p.Url; Proxy = $p.Proxy; Log = $f
-    Proc = (Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $f -RedirectStandardError ($f -replace '\.out$','.err')) }
+    Proc = (Start-Process $curlExe -ArgumentList (ConvertTo-ArgString $a) -NoNewWindow -PassThru -RedirectStandardOutput $f -RedirectStandardError ($f -replace '\.out$','.err')) }
 })
 $jobs.Proc | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
 $results = @(foreach ($j in $jobs) {
@@ -202,9 +217,14 @@ $results = @(foreach ($j in $jobs) {
     Bytes = $(if ($o[1] -match '^\d+$') { [int64]$o[1] } else { 0 })
     KBps  = $(if ($o[2] -match '^[\d.]+$') { [int][math]::Round([double]$o[2] / 1KB, 0) } else { 0 }) }
 })
-$results | Sort-Object @{Expression = { $_.Bytes -ge 524288 }; Descending = $true}, @{Expression = 'KBps'; Descending = $true} |
+$results | Sort-Object @{Expression = { $_.Bytes -ge $minBytes }; Descending = $true}, @{Expression = 'KBps'; Descending = $true} |
   ForEach-Object { '{0,-30} code={1} bytes={2,9} KBps={3,6}' -f $_.Name, $_.Code, $_.Bytes, $_.KBps }
 $cand2 = @($results | Where-Object { $_.Code -in @('200','206') -and $_.Bytes -ge $minBytes } | Sort-Object KBps -Descending)
+if ($cand2.Count -eq 0 -and $total -le 0) {
+  # total 未知（API 被限流/不可达）时不能拿 512KB 门槛淘汰小资产；206 已证明可 Range 下载
+  $cand2 = @($results | Where-Object { $_.Code -eq '206' -and $_.Bytes -gt 0 } | Sort-Object KBps -Descending)
+  if ($cand2.Count -gt 0) { 'ROUTE_RELAXED: total 未知，按 206 接受小资产' }
+}
 if ($cand2.Count -eq 0) {
   throw ("NO_ROUTE: 所有路线都没拿到数据`n" + (($results | ForEach-Object { '{0} code={1} bytes={2} KBps={3}' -f $_.Name, $_.Code, $_.Bytes, $_.KBps }) -join "`n"))
 }
@@ -213,11 +233,13 @@ Remove-Item $pdir -Recurse -Force -ErrorAction SilentlyContinue
 "route=$($route.Name) KBps=$($route.KBps) slow=$($route.KBps -lt 100)"
 
 $corePid = $null
+$winRange = [bool]($route.Code -eq '206')
+$bCode = '000'; $bGot = [int64]0; $bRoute = $null
 $up = [bool](Test-Port '127.0.0.1' 7897)
 if ($up -and -not $isLocal) { 'PORT_7897_ALREADY_LISTENING: 用现成的，收尾不要停' }
 elseif ($up -and $isLocal) { 'LOCAL_TARGET: 现有代理对本地地址无用，本轮单流/分段都走直连' }
 elseif ($coreDir -and $cfgDir -and (Test-Path (Join-Path $coreDir 'verge-mihomo.exe'))) {
-  $core = Start-Process -FilePath (Join-Path $coreDir 'verge-mihomo.exe') -ArgumentList @('-d',$cfgDir,'-f',(Join-Path $cfgDir 'clash-verge.yaml')) -WindowStyle Hidden -PassThru
+  $core = Start-Process -FilePath (Join-Path $coreDir 'verge-mihomo.exe') -ArgumentList (ConvertTo-ArgString @('-d',$cfgDir,'-f',(Join-Path $cfgDir 'clash-verge.yaml'))) -WindowStyle Hidden -PassThru
   $corePid = $core.Id
   for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Milliseconds 700; if (Test-Port '127.0.0.1' 7897) { break } }
 } else { 'NO_CLASH_CORE: 没找到内核/配置，跳过 B 路线' }
@@ -239,7 +261,12 @@ if ($total -gt 0 -and $total -lt 100MB) {
     $bKB = 0
   }
 }
-if ($bKB -ge 100 -and $bKB -gt $route.KBps) { $winUrl = $u; $winProxy = 'http://127.0.0.1:7897'; 'B 胜出，改用本机内核' }
+if ($bKB -ge 100 -and $bKB -gt $route.KBps) {
+  $bRoute = [pscustomobject]@{ Name = 'B 本机内核'; Url = $u; Proxy = 'http://127.0.0.1:7897'; Code = $bCode; Bytes = $bGot; KBps = $bKB }
+  $route = $bRoute; $winUrl = $u; $winProxy = 'http://127.0.0.1:7897'
+  $winRange = [bool]($bCode -eq '206')
+  'B 胜出，改用本机内核'
+}
 $singleKB = [int]$bKB
 if ($singleKB -le 0) { $singleKB = [int]$route.KBps }
 "singleKB=$singleKB (>=3072 视为单连接没被限速)"
@@ -254,7 +281,7 @@ function Test-Ladder([int]$n,[string]$url,[string]$proxy,[int64]$total = 0,[int]
     $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$s-",'-o','NUL','-m',"$sec",'-w','%{http_code}|%{size_download}|%{speed_download}')
     if ($proxy) { $a += @('--proxy',$proxy) } else { $a += @('--noproxy','*') }
     $a += $url
-    Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $dir "p$i.out") -RedirectStandardError (Join-Path $dir "p$i.err")
+    Start-Process $curlExe -ArgumentList (ConvertTo-ArgString $a) -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $dir "p$i.out") -RedirectStandardError (Join-Path $dir "p$i.err")
   })
   $ps | Wait-Process -Timeout ($sec + 30) -ErrorAction SilentlyContinue
   $ps | Where-Object { -not $_.HasExited } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -295,9 +322,11 @@ if ($runs.Count -gt 0) {
   "LADDER_DONE: rungs=$($rungs -join '/') passes=3 winN=$winN ratio=${ratio}x"
 }
 if ($Parts -gt 0) {
-  if ($total -gt 0) { $winN = [int]$Parts }   # -Parts 的含义是「段数」，第 7 步据此切分并回显 PARTS_OVERRIDE
-  else { "PARTS_IGNORED: 总字节数未知（API 限流或不可达），无法切 range，改走单流"; $winN = 1 }
+  if ($total -le 0) { "PARTS_IGNORED: 总字节数未知（API 限流或不可达），无法切 range，改走单流"; $winN = 1 }
+  elseif (-not $winRange) { "PARTS_IGNORED: 胜出路线不支持 Range（probe code=$($route.Code)），改走单流"; $winN = 1 }
+  else { $winN = [math]::Min([int]$Parts, 128) }   # -Parts 是「段数」，第 7 步据此切分并回显 PARTS_OVERRIDE
 }
+if (-not $winRange) { $winN = 1 }
 
 $ErrorActionPreference = 'Stop'
 $swAll = [Diagnostics.Stopwatch]::StartNew()
@@ -311,8 +340,6 @@ if (-not $safe) { $safe = 'download' }
 $dir = Join-Path $base ($safe + '.parts')
 $out = Join-Path $base $asset
 New-Item -ItemType Directory $base -Force | Out-Null
-if ($dir -match ' ') { throw "SPACE_IN_PATH: $dir 含空格，5.1 的 Start-Process 会拆坏 -o" }
-$assetUrl = $(if ($aid -gt 0) { "https://api.github.com/repos/$repo/releases/assets/$aid" } else { $winUrl })
 
 # 孤儿收尾：上次被强杀留下的 curl 可能还在写同一目录（只认本目录）
 if ($onWin) {
@@ -336,36 +363,88 @@ if ($ForceClean) {
 }
 $engine = 'single'; $nseg = 1; $chunk = [int64]0; $repairs = 0; $stalls = 0; $swE = $null
 if ($verifiedBefore) { $engine = 'cached' }
-elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
+elseif ($total -le 0 -or ($total -lt ($ladderMinMB * 1MB) -and $Parts -le 0 -and -not $ForceLadderSwitch) -or $winN -le 1) {
   $singleResume = @()
   if ((Test-Path $out) -and $total -gt 0 -and (Get-Item $out).Length -lt $total) {
     $singleResume = @('-C','-'); "SINGLE_RESUME: 从 $((Get-Item $out).Length) 字节继续"
   }
-  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-H','Accept: application/octet-stream','-o',$out,'-D',"$out.headers",'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}') + $singleResume + $retry
-  if ($winProxy) { $a += @('--proxy', $winProxy) } else { $a += @('--noproxy', '*') }
-  $a += $assetUrl
-  $st = (& $curlExe @a 2> "$out.err" | Out-String).Trim()
-  "SINGLE exit=$LASTEXITCODE $st"
-  if ($LASTEXITCODE -ne 0) { throw "SINGLE_FAILED: exit=$LASTEXITCODE $st $((Get-Content "$out.err" -Raw -ErrorAction SilentlyContinue))" }
-  Remove-Item "$out.err" -Force -ErrorAction SilentlyContinue
-  # -D 会把重定向链每一跳的响应头都写进来，302 那跳是 Content-Length: 0，必须取最后一个
-  if (-not $singleResume -and (Test-Path "$out.headers")) {
-    $cls = [regex]::Matches([IO.File]::ReadAllText("$out.headers"), '(?im)^content-length:\s*(\d+)\s*$')
-    if ($cls.Count -gt 0 -and $total -gt 0) {
-      $declared = [int64]$cls[$cls.Count - 1].Groups[1].Value
-      if ($declared -gt 0 -and $declared -ne $total) { throw "SIZE_MISMATCH: Content-Length=$declared 与 total=$total 不一致（下载被截断或换过文件），文件留在 $out" }
-      "content_length_ok=$declared（取重定向链最后一个）"
-    }
+  # 单流也要用第 4/5 步实测最快的路线；镜像/代理失败时按候选顺序回退，而不是一开始就直连
+  $singleRoutes = @([pscustomobject]@{ Name = $route.Name; Url = $winUrl; Proxy = $winProxy })
+  foreach ($cr in @($cand2)) {
+    if ($cr.Url -eq $winUrl -and $cr.Proxy -eq $winProxy) { continue }
+    $singleRoutes += $cr
   }
-  Remove-Item "$out.headers" -Force -ErrorAction SilentlyContinue
+  $singleRoutes = @($singleRoutes | Select-Object -First 3)
+  $singleOk = $false; $singleErr = ''
+  for ($si = 0; $si -lt $singleRoutes.Count; $si++) {
+    $sr = $singleRoutes[$si]
+    if ($si -gt 0) { "SINGLE_ROUTE_FALLBACK: 改走 $($sr.Name)" }
+    $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-H','Accept: application/octet-stream','-o',$out,'-D',"$out.headers",'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}') + $singleResume + $retry
+    if ($sr.Proxy) { $a += @('--proxy', $sr.Proxy) } else { $a += @('--noproxy', '*') }
+    $a += $sr.Url
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $st = (& $curlExe @a 2> "$out.err" | Out-String).Trim()
+      $ec = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $oldEap }
+    "SINGLE exit=$ec route=$($sr.Name) $st"
+    if ($ec -ne 0) {
+      $singleErr = "SINGLE_FAILED: route=$($sr.Name) exit=$ec $st $((Get-Content "$out.err" -Raw -ErrorAction SilentlyContinue))"
+      $left = $(if (Test-Path $out) { (Get-Item $out).Length } else { 0 })
+      Remove-Item "$out.err","$out.headers" -Force -ErrorAction SilentlyContinue
+      if ($left -eq 0 -and -not $singleResume -and $si -lt ($singleRoutes.Count - 1)) {
+        Remove-Item $out -Force -ErrorAction SilentlyContinue
+        continue
+      }
+      throw $singleErr
+    }
+    Remove-Item "$out.err" -Force -ErrorAction SilentlyContinue
+    if (-not $singleResume) {
+      $left = $(if (Test-Path $out) { (Get-Item $out).Length } else { 0 })
+      if ($left -eq 0 -and $total -gt 0 -and $si -lt ($singleRoutes.Count - 1)) {
+        Remove-Item $out -Force -ErrorAction SilentlyContinue
+        "SINGLE_ROUTE_FALLBACK: 下载 0 字节，改走 $($singleRoutes[$si + 1].Name)"
+        continue
+      }
+      # -D 会把重定向链每一跳的响应头都写进来，302 那跳是 Content-Length: 0，必须取最后一个
+      if (Test-Path "$out.headers") {
+        $cls = [regex]::Matches([IO.File]::ReadAllText("$out.headers"), '(?im)^content-length:\s*(\d+)\s*$')
+        if ($cls.Count -gt 0 -and $total -gt 0) {
+          $declared = [int64]$cls[$cls.Count - 1].Groups[1].Value
+          if ($declared -gt 0 -and $declared -ne $total) {
+            $msg = "SIZE_MISMATCH: Content-Length=$declared 与 total=$total 不一致（下载被截断或换过文件），文件留在 $out"
+            Remove-Item "$out.headers" -Force -ErrorAction SilentlyContinue
+            if ($si -lt ($singleRoutes.Count - 1)) {
+              Remove-Item $out -Force -ErrorAction SilentlyContinue
+              "SINGLE_ROUTE_FALLBACK: Content-Length 不符，改走 $($singleRoutes[$si + 1].Name)"
+              continue
+            }
+            throw $msg
+          }
+          "content_length_ok=$declared（取重定向链最后一个）"
+        }
+      }
+    }
+    Remove-Item "$out.headers" -Force -ErrorAction SilentlyContinue
+    $singleOk = $true
+    break
+  }
+  if (-not $singleOk) { throw $singleErr }
   if ($total -le 0) { $total = (Get-Item $out).Length; "total_from_download=$total" }
 } else {
   $root = ([IO.Path]::GetPathRoot($dir)).TrimEnd('\').TrimEnd(':')
   $freeGB = [math]::Round((Get-PSDrive $root).Free / 1GB, 1); $needGB = [math]::Round(($total * 2 / 1GB), 1)
   if ($freeGB -lt $needGB) { throw "SPACE_LOW: free=${freeGB}GB need=${needGB}GB" }
   $poolAll = @($results | Where-Object { $_.Code -eq '206' -and $_.Bytes -ge 1048576 } | Sort-Object KBps -Descending)
-  $pool = $(if ($poolAll.Count -gt 0) { @($poolAll | Select-Object -First 3) } else { @($route) })
-  $pool = @($pool)
+  $pool = @($poolAll | Select-Object -First 3)
+  if (-not $NoKernelPool -and $bRoute -and $bRoute.Code -eq '206') {
+    # B 是本轮刚测出的最快本机内核：分段池给它一个位置，但不挤掉全部镜像
+    $others = @($pool | Where-Object { -not ($_.Url -eq $bRoute.Url -and $_.Proxy -eq $bRoute.Proxy) })
+    $pool = @($bRoute) + @($others | Select-Object -First 2)
+    "POOL_KERNEL: B 本机内核加入分段池（-NoKernelPool 可关）"
+  }
+  if ($pool.Count -eq 0) { $pool = @($route) }
   if ($pool.Count -eq 0) { throw "POOL_EMPTY: 没有可用路线（route=$($route.Name) code=$($route.Code)），先看第 4 步的 route 表" }
   $poolN = [math]::Max(1, $pool.Count)
   $perKB = [math]::Max([int]$singleKB, 512)
@@ -386,7 +465,19 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
   if ((Test-Path $manifest) -and -not $ForceClean) {
     try {
       $mf = Get-Content $manifest -Raw | ConvertFrom-Json
-      if ([int64]$mf.total -eq $total -and $mf.url -eq $winUrl) {
+      $srcOk = $false
+      if ($mf.source) {
+        if ([string]$mf.source -eq $u) { $srcOk = $true }
+      } elseif ($mf.url) {
+        # 兼容旧 manifest：它记的是上一轮胜出路线，可能是镜像 URL 或 api asset URL
+        $old = [string]$mf.url
+        if ($old -eq $u -or $old -eq $winUrl) { $srcOk = $true }
+        elseif ($old -match '^https?://[^/]+/(?<inner>https?://github\.com/.+)$') {
+          if ($Matches.inner -eq $u) { $srcOk = $true }
+        }
+      }
+      $assetOk = (-not $mf.asset) -or ([string]$mf.asset -eq $asset)
+      if ([int64]$mf.total -eq $total -and $srcOk -and $assetOk) {
         $chunk = [int64]$mf.chunk; $nseg = [int]$mf.nseg; $resumePlan = $true
         $had = @(Get-ChildItem $dir -Filter 'p*.bin' -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
         "RESUME_PLAN: 沿用 nseg=$nseg chunk=$([math]::Round($chunk/1MB,1))MB 已有 $([math]::Round($had/1MB,1))MB"
@@ -396,7 +487,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
   if (-not $resumePlan) {
     Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory $dir -Force | Out-Null
-    @{ total = $total; chunk = $chunk; nseg = $nseg; url = $winUrl; asset = $asset } | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifest -Encoding ASCII
+    @{ schema = 2; total = $total; chunk = $chunk; nseg = $nseg; source = $u; asset = $asset } | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifest -Encoding ASCII
   }
   $poolNames = ($pool | ForEach-Object { $_.Name }) -join '+'
   "PLAN: nseg=$nseg chunk=$([math]::Round($chunk/1MB,1))MB workers=$workers pool=$poolNames"
@@ -423,7 +514,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
       if ($rt.Proxy) { $a += @('--proxy', $rt.Proxy) } else { $a += @('--noproxy', '*') }
       $a += $rt.Url
       $lg = Join-Path $dir ("p{0:000}.log" -f $seg.Index)
-      $pr = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $lg -RedirectStandardError ($lg -replace '\.log$', '.err')
+      $pr = Start-Process $curlExe -ArgumentList (ConvertTo-ArgString $a) -NoNewWindow -PassThru -RedirectStandardOutput $lg -RedirectStandardError ($lg -replace '\.log$', '.err')
       $running[$jid] = [pscustomobject]@{ Seg = $seg; File = $f; Resume = $(if ($tgt -eq $f) { $null } else { $tgt }); Proc = $pr; Last = $have; Still = 0 }
     }
     Start-Sleep -Milliseconds 500
@@ -509,10 +600,22 @@ if ($want) {
 # 冒烟："文件在" ≠ "文件能用"；原生 stderr 一律 *> 文件，不要 2>&1
 $smoke = 'SKIP'
 if ($verifiedOk -and $asset -match '\.exe$') {
-  $verF = Join-Path $env:TEMP ("ver_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-  $null = & $out --version *> $verF
-  $smoke = ((((Get-Content $verF -Raw -ErrorAction SilentlyContinue) + '').Trim()) -split "`n")[0].Trim()
-  Remove-Item $verF -Force -ErrorAction SilentlyContinue
+  if (-not $want) {
+    # 没有 digest 时只能证明字节数，不能证明 exe 可信；绝不执行未校验的下载物
+    $smoke = 'SKIP_UNVERIFIED_EXE'
+  } else {
+    $verF = Join-Path $env:TEMP ("ver_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
+    $verE = "$verF.err"
+    try {
+      $p = Start-Process -FilePath $out -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $verF -RedirectStandardError $verE
+      if (-not $p.WaitForExit(10000)) { $p.Kill(); $smoke = 'SMOKE_TIMEOUT' }
+      else {
+        $txt = ((((Get-Content $verF -Raw -ErrorAction SilentlyContinue) + '').Trim()) + "`n" + (((Get-Content $verE -Raw -ErrorAction SilentlyContinue) + '').Trim())).Trim()
+        $smoke = $(if ($txt) { ($txt -split "`n")[0].Trim() } else { 'SMOKE_NO_OUTPUT' })
+      }
+    } catch { $smoke = "SMOKE_FAILED: $($_.Exception.Message)" }
+    Remove-Item $verF,$verE -Force -ErrorAction SilentlyContinue
+  }
 } elseif ($verifiedOk -and $asset -match '\.zip$') {
   $tmp = Join-Path $env:TEMP ("smoke_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
   try { Expand-Archive -LiteralPath $out -DestinationPath $tmp -Force; $smoke = "unzip_ok files=$(@(Get-ChildItem $tmp -Recurse -File).Count)" }
@@ -524,8 +627,8 @@ if ($verifiedOk -and $asset -match '\.exe$') {
 "smoke=$smoke"
 $elapsedSec = $(if ($swAll) { [math]::Round($swAll.Elapsed.TotalSeconds, 1) } else { 0 })
 $avgMBs = $(if ($elapsedSec -gt 0) { [math]::Round(($size / 1MB) / $elapsedSec, 2) } else { 0 })
-$resEngine = $(if ($parts -gt 1) { 'segments' } else { 'single' })
-$resParts = [math]::Max(1, [int]$parts)
+$resEngine = $engine
+$resParts = $(if ($engine -eq 'segments') { [math]::Max(1, [int]$nseg) } else { 1 })
 $resVerified = $(if (-not $verifiedOk) { 'failed' } elseif ($want) { 'sha256' } else { 'size_only' })
 $resHash = $(if ($got) { $got } else { '' })
 'RESULT_JSON: ' + (@{
@@ -537,9 +640,9 @@ $resHash = $(if ($got) { $got } else { '' })
 if ($corePid) { Stop-Process -Id $corePid -ErrorAction SilentlyContinue }
 if ($verifiedOk -and -not $KeepParts) { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
 elseif (Test-Path $dir) { "PARTS_KEPT: 分片保留在 $dir（校验未通过或 -KeepParts；重跑会续传，-ForceClean 可清掉重下）" }
-Get-ChildItem $env:TEMP -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -like 'ladder_*' -or $_.Name -like 'probe_*' -or $_.Name -like 'meta_*' -or $_.Name -like 'cur_*' -or $_.Name -like 'raw_*' -or $_.Name -like 'ver_*' -or $_.Name -like 'smoke_*' } |
-  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+# 临时文件由各自的创建者就地清理；这里不要按固定前缀扫 %TEMP%，
+# 否则并发实例/其它 agent 的文件会被一起删掉。
+
 "7897=$([bool](Test-Port '127.0.0.1' 7897)) corePid=$corePid"
 if ($onWin) { $null = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyEnable }
 

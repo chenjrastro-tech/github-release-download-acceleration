@@ -369,8 +369,8 @@ probe "D 直连" "$u" "" >> "$TMPD/probes" &
 echo $! >> "$PIDS"
 wait || true
 
-minb=262144
-if [ "${TOTAL:-0}" -gt 0 ] && [ "$TOTAL" -lt 262144 ]; then minb=$TOTAL; fi
+minb=524288
+if [ "${TOTAL:-0}" -gt 0 ] && [ "$TOTAL" -lt "$minb" ]; then minb=$TOTAL; fi
 best=$(awk -F'|' -v minb="$minb" '{
     code=$2; bytes=$3+0; spd=$4+0;
     if ((code=="200"||code=="206") && bytes>=minb) printf "%d\t%s\t%s\t%s\t%s\n", spd/1024, $1, $5, $6, code;
@@ -550,12 +550,40 @@ if [ "$FORCE_CLEAN" = "1" ]; then
   echo "FORCE_CLEAN: 已删旧成品与旧分片"
 fi
 
+hash_file() { # $1=file → 纯小写 hex，或空
+  local h
+  if command -v openssl >/dev/null 2>&1; then
+    # macOS 自带 LibreSSL：-r 输出 "<hex> *<file>"，取第一列
+    h=$(openssl dgst -sha256 -r "$1" 2>/dev/null | awk '{print $1}')
+    if [ -n "${h:-}" ] && [ ${#h} -eq 64 ]; then printf '%s\n' "$h" | tr 'A-F' 'a-f'; return 0; fi
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    h=$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')
+    if [ -n "${h:-}" ] && [ ${#h} -eq 64 ]; then printf '%s\n' "$h" | tr 'A-F' 'a-f'; return 0; fi
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    h=$(sha256sum "$1" 2>/dev/null | awk '{print $1}')
+    [ -n "${h:-}" ] && printf '%s\n' "$h" | tr 'A-F' 'a-f'
+  fi
+}
+
 skip_dl=0
 if [ -f "$target" ] && [ "${TOTAL:-0}" -gt 0 ]; then
   have=$(wc -c < "$target" | tr -d ' ')
   if [ "$have" -eq "$TOTAL" ]; then
     skip_dl=1
-    echo "ALREADY_DONE: $target 已存在且 $have 字节（不重下）"
+    if [ -n "${WANT:-}" ]; then
+      hh=$(hash_file "$target")
+      want_lc=$(printf '%s' "$WANT" | tr 'A-F' 'a-f')
+      if [ -z "$hh" ]; then
+        echo "NO_HASH_TOOL: 没有 openssl/shasum/sha256sum，只做字节校验"
+      elif [ "$hh" != "$want_lc" ]; then
+        skip_dl=0
+        echo "ALREADY_DONE_HASH_MISMATCH: 已有文件字节对但 SHA256 不符，重新下载" >&2
+        rm -f "$target"
+      fi
+    fi
+    [ "$skip_dl" = "1" ] && echo "ALREADY_DONE: $target 已存在且 $have 字节（不重下）"
   fi
 fi
 
@@ -652,9 +680,13 @@ if [ "$skip_dl" = "1" ]; then
 elif [ "$winN" -gt 1 ] && [ "${TOTAL:-0}" -gt 0 ]; then
   PARTS_DIR="$OUTDIR/$asset.parts"
   manifest="$PARTS_DIR/manifest"
-  m_total=0; m_chunk=0; m_nseg=0
-  if [ -f "$manifest" ]; then read -r m_total m_chunk m_nseg < "$manifest" || true; fi
-  if [ "${m_total:-0}" -eq "$TOTAL" ] && [ "${m_nseg:-0}" -ge 1 ] && [ "${m_chunk:-0}" -ge 1 ]; then
+  m_total=0; m_chunk=0; m_nseg=0; m_source=""
+  if [ -f "$manifest" ]; then
+    read -r m_total m_chunk m_nseg < "$manifest" || true
+    m_source=$(sed -n '2p' "$manifest" 2>/dev/null || true)
+  fi
+  if [ "${m_total:-0}" -eq "$TOTAL" ] && [ "${m_nseg:-0}" -ge 1 ] && [ "${m_chunk:-0}" -ge 1 ] &&
+     { [ -z "${m_source:-}" ] || [ "$m_source" = "$URL" ]; }; then
     SEG_N=$m_nseg; SEG_CHUNK=$m_chunk
     echo "RESUME_PLAN: 沿用上次分段 nseg=$SEG_N chunk=$SEG_CHUNK"
   else
@@ -662,7 +694,7 @@ elif [ "$winN" -gt 1 ] && [ "${TOTAL:-0}" -gt 0 ]; then
     SEG_N=$winN
     SEG_CHUNK=$(( TOTAL / SEG_N ))
     while [ $(( SEG_CHUNK * SEG_N )) -lt "$TOTAL" ]; do SEG_CHUNK=$((SEG_CHUNK + 1)); done
-    printf '%s %s %s\n' "$TOTAL" "$SEG_CHUNK" "$SEG_N" > "$manifest"
+    printf '%s %s %s\n%s\n' "$TOTAL" "$SEG_CHUNK" "$SEG_N" "$URL" > "$manifest"
     echo "PLAN: nseg=$SEG_N chunk=$SEG_CHUNK"
   fi
 
@@ -846,23 +878,6 @@ if [ "${TOTAL:-0}" -gt 0 ] && [ "$size" -ne "$TOTAL" ]; then
   echo "DOWNLOAD_VERIFY_FAILED: size mismatch" >&2; exit 1
 fi
 
-hash_file() { # $1=file → 纯小写 hex，或空
-  local h
-  if command -v openssl >/dev/null 2>&1; then
-    # macOS 自带 LibreSSL：-r 输出 "<hex> *<file>"，取第一列
-    h=$(openssl dgst -sha256 -r "$1" 2>/dev/null | awk '{print $1}')
-    if [ -n "${h:-}" ] && [ ${#h} -eq 64 ]; then printf '%s\n' "$h" | tr 'A-F' 'a-f'; return 0; fi
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    h=$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')
-    if [ -n "${h:-}" ] && [ ${#h} -eq 64 ]; then printf '%s\n' "$h" | tr 'A-F' 'a-f'; return 0; fi
-  fi
-  if command -v sha256sum >/dev/null 2>&1; then
-    h=$(sha256sum "$1" 2>/dev/null | awk '{print $1}')
-    [ -n "${h:-}" ] && printf '%s\n' "$h" | tr 'A-F' 'a-f'
-  fi
-}
-
 if [ -n "$WANT" ]; then
   got=$(hash_file "$target")
   if [ -z "$got" ]; then
@@ -908,8 +923,9 @@ if [ -n "${WANT:-}" ]; then
 else
   res_verified=size_only
 fi
-printf 'RESULT_JSON: {"asset":"%s","bytes":%s,"total":%s,"sha256":"%s","expected":"%s","verified":"%s","engine":"%s","parts":%s,"route":"%s","elapsed_s":%s}\n' \
-  "$asset" "$size" "${TOTAL:-0}" "${got:-}" "$WANT" "$res_verified" "$res_engine" "$res_parts" "${win_name:-}" "$(( $(date +%s) - T_START ))"
+smoke=${smoke:-SKIP}
+printf 'RESULT_JSON: {"asset":"%s","bytes":%s,"total":%s,"sha256":"%s","expected":"%s","verified":"%s","engine":"%s","parts":%s,"route":"%s","smoke":"%s","elapsed_s":%s}\n' \
+  "$asset" "$size" "${TOTAL:-0}" "${got:-}" "$WANT" "$res_verified" "$res_engine" "$res_parts" "${win_name:-}" "$smoke" "$(( $(date +%s) - T_START ))"
 
 echo "saved=$target"
 exit 0

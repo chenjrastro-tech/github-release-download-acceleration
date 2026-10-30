@@ -10,9 +10,12 @@
     /big.bin       123456789 B（非 2 的幂、非段长整数倍），支持 Range
     /big2.bin      67108864 B（64MB），给「同一 OutDir 并发两个资产」用例
     /nodash.bin    4 MB，Support Range
+    /small.bin     300000 B，给「GitHub 小资产低于旧 512KB 门槛」用例
+    /fake.exe      1024 B，给「无 digest 不执行下载的 exe」用例
     /short.bin     声明 2 MB，实际只发 700 KB 就断开（模拟「短包」）
     /norange.bin   1 MB，故意忽略 Range（永远 200 + 全量），模拟不支持分段的服务器
     /huge.bin      1,880,743,936 B（1.75GB，非 2 的幂），给「≥1GB 段粒度」手动验收用，不参与 run-tests
+    /fallback.bin  3 MB，Range 探测慢 300ms，给「单流首候选失败→回退」用例
 #>
 [CmdletBinding()]
 param(
@@ -30,9 +33,13 @@ $specs = @{
   '/big.bin'     = @{ Total = 123456789; Mode = 'ok' }
   '/big2.bin'    = @{ Total = 67108864;  Mode = 'ok' }
   '/nodash.bin'  = @{ Total = 4194304;   Mode = 'ok' }
+  '/small.bin'   = @{ Total = 300000;    Mode = 'ok' }
+  '/fake.exe'    = @{ Total = 1024;      Mode = 'ok' }
   '/short.bin'   = @{ Total = 2097152;   Mode = 'short'; Send = 716800 }
   '/norange.bin' = @{ Total = 1048576;   Mode = 'norange' }
   '/huge.bin'    = @{ Total = 1880743936; Mode = 'ok' }
+  # 给「单流首候选失败→回退」用例：Range 探测故意慢 300ms，让 fake proxy 的 A 路线胜出
+  '/fallback.bin' = @{ Total = 3145728; Mode = 'ok'; SlowRangeMs = 300 }
   # 故障端点：永远返回同一个状态码，用来验证「失败要干净、可解释、不落半成品」
   '/e403.bin'    = @{ Total = 0; Mode = 'status'; Code = 403; Reason = 'Forbidden' }
   '/e503.bin'    = @{ Total = 0; Mode = 'status'; Code = 503; Reason = 'Service Unavailable'; RetryAfter = 1 }
@@ -114,6 +121,10 @@ while ($true) {
         $rs = [int64]$Matches[1]
         if ($Matches[2]) { $re = [math]::Min([int64]$Matches[2], $total - 1) }
       }
+    }
+
+    if ($spec.ContainsKey('SlowRangeMs') -and $hasRange) {
+      Start-Sleep -Milliseconds ([int]$spec.SlowRangeMs)
     }
 
     if ($spec.Mode -eq 'norange') {

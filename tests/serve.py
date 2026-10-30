@@ -4,6 +4,7 @@
 Usage:  python3 tests/serve.py [port]
 Endpoints:
   /ok.bin        3 MB, supports Range
+  /small.bin     300 KB, supports Range (below the old 512 KB probe floor)
   /big.bin       64 MB, supports Range
   /norange.bin   1 MB, ignores Range (always 200 + full body)
   /short.bin     declares 2 MB, sends only 700 KB then closes
@@ -21,8 +22,8 @@ suite deterministic no matter how many probe requests the runner makes first.
 import socket, socketserver, sys, threading
 
 PATTERN = bytes(((i * 7 + 3) & 0xFF) for i in range(1024 * 1024))
-SIZES = {"/ok.bin": 3 * 1024 * 1024, "/big.bin": 64 * 1024 * 1024, "/norange.bin": 1024 * 1024,
-         "/flaky.bin": 1024 * 1024, "/flaky429.bin": 1024 * 1024}
+SIZES = {"/ok.bin": 3 * 1024 * 1024, "/small.bin": 300000, "/big.bin": 64 * 1024 * 1024,
+         "/norange.bin": 1024 * 1024, "/flaky.bin": 1024 * 1024, "/flaky429.bin": 1024 * 1024}
 FLAKY_LEFT = {"/flaky.bin": 2, "/flaky429.bin": 2}
 FLAKY_CODE = {"/flaky.bin": 503, "/flaky429.bin": 429}
 LOCK = threading.Lock()

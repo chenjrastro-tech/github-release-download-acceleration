@@ -1,9 +1,10 @@
 # 三平台离线回归 —— 只跑仓库自带的本地套件，不装依赖、不访问外网。
 #
 #   windows job     : scripts/validate.ps1 → scripts/build-runner.ps1 -Check → tests/run-tests.ps1
-#                     （37 条断言，Windows PowerShell 5.1；套件自己用 powershell.exe 起 tests/serve.ps1 假服务器）
+#                     → node --test tests/index.test.mjs
+#                     （84 条 runner 断言 + 6 条 provider 单测；runner 套件自己用 powershell.exe 起 tests/serve.ps1 假服务器）
 #   macos/linux job : bash -n scripts/ghdl.sh → PYTHON=python3 bash tests/run-tests-sh.sh
-#                     （23 条断言，含 403 / 503 / 429 / 302→404 / 谎报 416 的故障注入）
+#                     （26 条断言，含 403 / 503 / 429 / 302→404 / 谎报 416 / 小资产 / source manifest 续传）
 #   min-shells job  : 装 dash / busybox / ksh，各跑一遍 scripts/ghdl-min.sh
 #                     （验证「POSIX sh、无数组」这句宣称，不再只有 bash 覆盖）
 #
@@ -73,10 +74,15 @@ jobs:
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-runner.ps1 -Check
 
-      # 37 条断言：单流 / 幂等 / 强制重下 / 16 段 / 续传 / 坏分片 / 短包 / 无 Range / 404 / 死代理 / 并发夹取 / 本机目标
+      # 84 条断言：单流 / 幂等 / 强制重下 / 16 段 / 续传（旧+新 manifest）/ 坏分片 / 短包 / 无 Range / 404 / 死代理 / 并发夹取 / 本机目标 / 小资产 / 空格路径 / Parts 门控 / 无 digest exe / 单流首候选 0 字节回退
       - name: 离线回归（run-tests.ps1）
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+
+      # 技能 provider 的纯 Node 单元测试（6 条，不装依赖；node --test 自带 runner）
+      - name: 技能 provider 单元测试（tests/index.test.mjs）
+        shell: powershell
+        run: node --test tests/index.test.mjs
       # 本地确定性基准（不碰外网）：同一资产「强制单流」vs「强制 16 段」，各 Runs 遍取中位数。
       # 本地回环没有每连接限速，16 段必然更慢——这一步把「不限速时该回退单流」的判据留在 CI 里，
       # 不再只靠文档声明。脚本只打印 BENCH/BENCH_VERDICT，永远 exit 0。
@@ -121,7 +127,7 @@ jobs:
         shell: bash
         run: bash -n scripts/ghdl.sh
 
-      # 23 条断言：单流 / 8 段 64MB / 续传 / 无 Range / 404 / 截断包 / P2SP 双源 / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟
+      # 26 条断言：单流 / 8 段 64MB / 续传（旧+source manifest）/ 无 Range / 404 / 截断包 / P2SP 双源 / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟 / RESULT_JSON / 小资产
       # + 故障注入（403 / 503 重试 / 429 重试 / 302→404 / 谎报 416）
       # 套件缺 curl 或 python3 时会打印 SKIP 并 exit 0，所以额外断言 TESTS_SH_OK 真的出现
       - name: 离线回归（run-tests-sh.sh）

@@ -19,7 +19,7 @@ GitHub Release 的大资产（几十到几百 MB 的安装包、便携包）在�
 | 环境自检 | 查 `curl.exe`、环境变量代理、系统代理、常见代理端口是否在监听；`ProxyServer` 残留值不算数，只有端口真的 Listen 才算 |
 | 四类路线并行实测 | A 现有代理 / B 无头拉起本机 Clash Verge 内核（`127.0.0.1:7897`）/ C 六个公共镜像 / D 直连，各跑一次 1MB range GET，按「先看是否真拿到 ≥512KB 数据，再看 KB/s」排序 |
 | 资产名校验闸门 | 测速前先用 release API 校验资产名；名字对不上就报 `ASSET_NOT_FOUND`，列出全部真实候选（名字 + MB）和最接近的一条，**停下等用户确认，绝不静默换名继续下** |
-| 并发阶梯（先判值不值得测） | 只有「资产 ≥100 MB **且** 单连接探针 <3 MB/s」才测——探针就是第 5 步那个 8 MB 单连接 GET 的 `$singleKB`，不额外花流量。测的时候 1/16 两档 × 三遍、限同一时间窗（4 秒）比聚合吞吐，取中位数并报 min–max；胜出档还要满足「完成数 n/n、三次波动 ≤2×」，两档中位数差 10% 以内选低并发，多段比单段快不到 1.25 倍就用单流。小包或单连接已经够快时**跳过整个阶梯**（省下约 24 秒与上百 MB 采样流量），`$ForceLadder = $true` 可强制测 |
+| 并发阶梯（先判值不值得测） | 只有「资产 ≥100 MB **且** 单连接探针 <3 MB/s」才测——探针就是第 5 步那个 8 MB 单连接 GET 的 `$singleKB`，不额外花流量。测的时候 1/16 两档 × 三遍、限同一时间窗（4 秒）比聚合吞吐，取中位数并报 min–max；胜出档还要满足「完成数 n/n、三次波动 ≤2×」，两档中位数差 10% 以内选低并发，多段比单段快不到 1.25 倍就用单流。小包或单连接已经够快时**跳过整个阶梯**（省下约 24 秒与上百 MB 采样流量），`-ForceLadder` 可强制测 |
 | 单流 / 分段两条下载路径 | `$winN=1` 或 `<100MB` 走单流一次拿完；大资产按 `$winN` 段并发，每段独立日志、带 `--retry`，`--retry-all-errors` 仅在 curl ≥7.71 时启用 |
 | 下载中自愈 | 45 秒看一次增长，20–30 秒还是 0 字节就只杀自己的 curl、清空分片、降并发（16→8→4）或切第二路线重开 |
 | digest 闭环校验 | 拼装前核对分片总字节，拼完比对 `size` 与 SHA256；无 digest 的老 release 只报「字节数一致」，绝不冒充校验通过 |
@@ -36,6 +36,7 @@ github-release-download-acceleration/
 ├── SKILL.md              # 技能正文（索引）：决策表 + 错误路径 + 步骤说明 + 参数 + Pitfalls
 ├── references/
 │   ├── runner-steps.md   # 0–10 步 powershell 真源（build-runner 用它生成 ghdl.ps1）
+│   ├── maintenance.md    # 施工法 A/B、发布四份证据（维护附录，不占 SKILL.md 体积）
 │   └── fetch-raw-via-api.md  # raw 文件改走 contents API 的具体命令
 ├── README.md             # 本文件
 ├── LICENSE               # MIT 许可证
@@ -110,7 +111,7 @@ github.com/neovim/neovim/releases/tag/v0.11.0 这个包下不动，你看着办
 https://github.com/junegunn/fzf/releases/download/v0.65.2/fzf-0.65.2-windows-x64.zip 帮我下这个
 ```
 
-可选地给一个目标目录（例如 `下到 D:\Downloads\_dl`）。不给目标目录时由宿主任选一个**不含空格**的落地目录（第 7 步会拒绝含空格的路径——5.1 的 `Start-Process` 会把 `-o` 参数拆坏），并在报告里给出绝对路径。
+可选地给一个目标目录（例如 `下到 D:\Downloads\_dl`）。不给目标目录时由宿主任选落地目录；含空格也可以，runner 用 `ConvertTo-ArgString` 给 `-o` 等参数加引号，最后在报告里给出绝对路径。
 
 内部执行顺序固定为：`解析 URL → 环境自检 → 定位内核与配置 → API 校验资产名 → 并行探测路线 →（必要时）无头起内核 → 按需阶梯（<100MB 或单连接已够快则跳过）→ 下载 → 监控/降档 → 拼装 → digest 校验 → 收尾`。
 
@@ -135,13 +136,14 @@ powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://example.com/big.bin'
 行为约定（agent 可以直接依赖）：
 
 - **幂等**：目标文件已存在且字节数（有 digest 时再加 SHA256）都对 → `ALREADY_DONE` 直接跳过，不重下。
-- **可续传**：分段方案写在 `<asset>.parts/manifest.json`；中断后重跑，`RESUME_PLAN` 沿用上次分段，已下分片跳过。
+- **可续传**：分段方案写在 `<asset>.parts/manifest.json`，记 content identity（`source`）而不是某一轮胜出的镜像；换镜像/代理启停后重跑仍能 `RESUME_PLAN`。旧格式（只有 `url`）也兼容。
 - **不留双写**：上次被强杀留下的 curl 还在写同一目录时，先 `ORPHANS_KILLED` 清掉再开工。
 - **退出码**：`0` 只有在校验通过时才返回；`DOWNLOAD_VERIFY_FAILED` / `SEGMENT_SIZE_MISMATCH` / `NO_ROUTE` 都是 `1`。
 - **失败保留现场**：校验没过时分片不删（`PARTS_KEPT`），下次接着下；确认不要了再加 `-ForceClean`。
 
 ```sh
-# macOS / Linux：行为对齐 ps1；CI 的 ubuntu-latest 与 macos-latest 均跑过 23 条 sh 套件
+# macOS / Linux：核心下载/校验语义与 ps1 一致；B 内核入池、单流多候选回退是 Windows 侧增强
+# CI 的 ubuntu-latest 与 macos-latest 均跑过 26 条 sh 套件
 sh scripts/ghdl.sh '<release 直链>'
 sh scripts/ghdl.sh '<release 直链>' -o /tmp/dl -p 16      # 选项与环境变量等价，选项优先
 sh scripts/ghdl.sh --help                                  # 全部选项
@@ -155,6 +157,7 @@ sh scripts/ghdl.sh --help                                  # 全部选项
 | 并发段数 | `-Parts N` | `-p, --parts N` | `0` = 按单连接速度自适应 |
 | 清现场重下 | `-ForceClean` | `--force-clean` | 连旧分片一起删 |
 | 强制阶梯 | `-ForceLadder` | `--force-ladder` | 跳过「单连接够快就单流」 |
+| 分段池内核 | `-NoKernelPool` | — | 默认把 B 本机内核加入分段池；加此开关关闭 |
 | 保留现场 | `-KeepParts` | `--keep-tmp` | 排错时看分片与日志 |
 | 冒烟 | **恒定开启** | `--smoke 0\|1` | ps1 故意不给关闭开关：`SMOKE_FAILED` 必须看得见 |
 | 帮助 | `-?` / `Get-Help` | `-h, --help` | |
@@ -267,7 +270,7 @@ DOWNLOAD_SIZE_OK_NO_DIGEST
 
 | 平台 | 入口 | 依赖 |
 | --- | --- | --- |
-| Windows | `scripts\ghdl.ps1 -Url '<url>' [-OutDir <目录>] [-Parts 16] [-ForceClean] [-KeepParts] [-ForceLadder]` | 系统自带 `curl.exe`（Win10 1803+） |
+| Windows | `scripts\ghdl.ps1 -Url '<url>' [-OutDir <目录>] [-Parts 16] [-ForceClean] [-KeepParts] [-ForceLadder] [-NoKernelPool]` | 系统自带 `curl.exe`（Win10 1803+） |
 | macOS / Linux | `bash scripts/ghdl.sh '<url>'` | 系统自带 `curl`；SHA256 走 `openssl` → `shasum` → `sha256sum` |
 
 ```bash
@@ -329,7 +332,7 @@ metadata:
 [FAIL] metadata.min_size_for_ladder_mb=80 与代码 $ladderMinMB = 100 不一致：改阈值要两处同步
 ```
 
-强制测阶梯（`$ForceLadder = $true`）时的实测形状：1 段中位 4,944 KB/s（4,471–5,893，波动 1.32×）、16 段中位 5,043 KB/s（4,305–5,632，波动 1.31×）→ 未过 1.25 倍门槛，`winN=1`。
+强制测阶梯（`-ForceLadder`）时的实测形状：1 段中位 4,944 KB/s（4,471–5,893，波动 1.32×）、16 段中位 5,043 KB/s（4,305–5,632，波动 1.31×）→ 未过 1.25 倍门槛，`winN=1`。
 
 功能回归（2026-10-28，把 SKILL.md 的代码块原样抽出来按顺序 dot-source 执行，不是另抄一份）：
 
@@ -345,19 +348,24 @@ metadata:
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 # 端口默认自动挑空闲的；要复现/排查时指定：-Port 19000
 # 端口被上一次异常中断留下的 serve.ps1 占着时，会先 SERVER_REAP 清掉再起新的（只清本仓库 tests\serve.ps1）
-# TESTS_OK: 59 项通过
+# TESTS_OK: 84 项通过
 
 # POSIX runner 的同款离线回归（本地假服务器 + 确定性 SHA256）
 bash tests/run-tests-sh.sh
-# TESTS_SH_OK: 23 项通过   （单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/死源/坏分片/幂等/KEEP_TMP/冒烟）
+# TESTS_SH_OK: 26 项通过   （单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/死源/坏分片/幂等/KEEP_TMP/冒烟/小资产/source manifest）
 # Windows 上跑要给真实解释器：PYTHON=C:/path/to/python3 bash tests/run-tests-sh.sh
+
+# 技能 provider 的 Node 单元测试（6 条，零依赖，node >= 18）
+node --test tests/index.test.mjs
+npm test    # 等价于上面这条（package.json 的 scripts.test）
+# 6 个测试全过（本机 Node 24.21 实测；node:test 在 Node 18+ 可用）
 ```
 
 `tests/serve.ps1` 用 `TcpListener` 在本机起一个假 Release 服务（支持 Range，也能模拟「只发 700KB 就断」和「根本不支持 Range」），
 `scripts/ghdl.sh` 同样支持任意 https 直链（`sh scripts/ghdl.sh <url>`，输出目录用 `OUTDIR`）、断点续传与幂等。
 
-`tests/run-tests.ps1` 会先用 1 字节 range 请求验明「端口上跑的确实是本仓库的 serve.ps1」，不是就直接报错退出（避免复用旧实例导致假失败）；然后跑 16 组场景 59 条断言：单流、幂等重跑、`-ForceClean`、16 段分段（123,456,789 B，非段长整数倍）、同一 OutDir 并发两个资产（分片目录按资产隔离）、没有 curl.exe 时改用 Invoke-WebRequest 单流降级、服务端 403/503/429 必须快速失败且不留半成品。
-续传（预置 manifest + 半个分片）、坏分片（长度不符）、短包、无 Range 服务器、全灭路线。
+`tests/run-tests.ps1` 会先用 1 字节 range 请求验明「端口上跑的确实是本仓库的 serve.ps1」，不是就直接报错退出（避免复用旧实例导致假失败）；然后跑 22 组场景 84 条断言：单流、幂等重跑、`-ForceClean`、16 段分段（123,456,789 B，非段长整数倍）、同一 OutDir 并发两个资产（分片目录按资产隔离）、没有 curl.exe 时改用 Invoke-WebRequest 单流降级、服务端 403/503/429 必须快速失败且不留半成品。
+续传（旧 manifest / 新 source manifest + 半个分片）、坏分片（长度不符）、短包、无 Range 服务器、全灭路线、300KB 小资产、OutDir 含空格、`-Parts` 在无 Range 时降级、无 digest 的 exe 不执行、单流首候选 0 字节时自动回退。
 不需要外网、不需要 GitHub 账号、不需要装任何东西；跑完自动清 `%TEMP%\ghdl_tests`（加 `-Keep` 保留现场）。
 
 **不覆盖**：digest 不匹配（要真 release）、`ASSET_NOT_FOUND`（要 GitHub API）、磁盘不足（要真满盘）——这三条只能真实环境验。
@@ -381,9 +389,10 @@ bash tests/run-tests-sh.sh
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 # VALIDATE_OK: 0 个错误 / 0 个告警
+# frontmatter 只保留 name/description/metadata；维护触发已并入 description，SKILL.md 约 42KB，低于 48KB 提醒线
 ```
 
-GitHub Actions（`.github/workflows/test.yml`，已并入 `main`）在 push / PR 时自动跑同一套：Windows 侧 `validate.ps1` + `build-runner -Check` + `run-tests.ps1`，
+GitHub Actions（`.github/workflows/test.yml`，已并入 `main`）在 push / PR 时自动跑同一套：Windows 侧 `validate.ps1` + `build-runner -Check` + `run-tests.ps1` + `node --test tests/index.test.mjs`，
 Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 2026-10-30 首次真跑：**Windows / Ubuntu / macOS 三个 job 全部 success**（run 41049031624，commit `dcf333c`）。macOS 那次跑在自带的 bash 3.2 + BSD 工具链上，一次抓出四个只在 BSD/bash 3.2 下才犯的错（`${arr[@]}` 空数组在 `set -u` 下 unbound、`wc -c` 输出前导空格、BSD `sed`/`awk` 处理中文报多字节错、`$VAR` 后面直接跟中文被当成变量名的一部分），全部修完后才绿。
@@ -396,6 +405,23 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
 ## 变更记录
+
+### 0.3.5（2026-10-31）
+
+**正确性修复**：
+- **小资产**：探测门槛从固定 512KB 改为 `min(512KB, total)`；小于 512KB 的 release 资产不再被判 `NO_ROUTE`；total 未知时放宽接受 `206` 小响应（`ROUTE_RELAXED`）。POSIX 侧同步用 512KB 并按 total 收缩。
+- **单流不再绕过镜像**：删掉单流走 `api.github.com/repos/.../assets/<id>` 的分支，改用本轮胜出的 `winUrl`；失败时按候选顺序最多回退 3 条路线，已下部分字节则保留续传。
+- **单流回退真正生效（Windows runner）**：原生 curl 失败时全局 `$ErrorActionPreference='Stop'` 会把 stderr 变成终止错误，fallback 永远到不了；单流调用期间改局部 `Continue` + `$LASTEXITCODE`，0 字节才换下一候选。POSIX `ghdl.sh` 仍按胜出路线下载、失败即 `SINGLE_FAILED`，本次未加候选回退。新增 [21] Windows 集成用例。
+- **B 本机内核进分段池**：阶梯测出的最快 7897 内核作为额外候选加入分段池，不挤掉全部镜像；`-NoKernelPool` 可关闭。
+- **续传身份**：manifest 改存 canonical `source`（schema=2），换镜像/代理启停不再误删分片；仍兼容旧 `url` 格式（含镜像包裹的 GitHub URL）。
+- **Range 门**：胜出路线不支持 Range 时，显式 `-Parts` 打 `PARTS_IGNORED` 并降级单流，不再拿整包当分片。
+- **`-Parts` 语义**：资产小于 100MB 时显式 `-Parts` 也生效（`PARTS_OVERRIDE`），不再被“小资产固定单流”静默吞掉。
+- **RESULT_JSON**：`engine`/`parts` 改取实际 `$engine`/`$nseg`，自动分段不再误报 `engine=single, parts=1`。
+- **含空格路径**：新增 `ConvertTo-ArgString`，所有 `Start-Process` 的 curl 参数统一加引号；删除 `SPACE_IN_PATH` 拒绝逻辑。
+- **无 digest 的 exe**：只校验字节，标记 `smoke=SKIP_UNVERIFIED_EXE`，不执行未校验二进制；有 digest 的 exe 冒烟加 10 秒超时。
+- **临时文件**：不再按 `%TEMP%` 固定前缀通配删除，避免误删并发实例/其它 agent 的文件。
+
+**测试/文档**：ps1 套件 22 组 84 条、sh 套件 26 条、Node provider 单测 6 条（`tests/index.test.mjs`，不装依赖）；新增 [21] 单流回退集成用例，用 `fallback.test` + `CURL_HOME` 的 `resolve` 规则让 fake proxy 胜出、再制造 0 字节断流，断言 `SINGLE_ROUTE_FALLBACK` 与最终 SHA256。`validate.ps1` 的 48KB 体积提醒改走 `Warn()`（告警数不再漏计）；`SKILL.md` 的施工法 A/B 与发布自查拆到 `references/maintenance.md`，正文从 50,529B 降到 42,033B，48KB 告警消失（README/CI 的断言数与自检输出同步）。下载默认策略未变（<100MB 单流，≥100MB 阶梯自适应；`-Parts` 仅显式时改变段数）。
 
 ### 0.3.4（2026-10-31）
 
@@ -489,12 +515,12 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 ## 限制
 
-- **Windows 完整支持**：依赖 `curl.exe` 与 Windows PowerShell 5.1，脚本写法（无 `-Parallel`、数组传参不加引号）按 5.1 的脾性来；端口探测用 `TcpClient`，不再依赖 `Get-NetTCPConnection`/注册表/`cmd mklink`。
+- **Windows 完整支持**：依赖 `curl.exe` 与 Windows PowerShell 5.1，脚本写法（无 `-Parallel`、`Start-Process` 参数统一走 `ConvertTo-ArgString` 加引号）按 5.1 的脾性来；端口探测用 `TcpClient`，不再依赖 `Get-NetTCPConnection`/注册表/`cmd mklink`。
 - **POSIX 验证边界**：`scripts/ghdl.sh` 在 Git Bash、ubuntu-latest、macos-latest 上回归通过（bash 3.2/5.x + BSD/GNU 工具）；`dash` 等非 bash shell 未测。
 - SHA256 闭环要求 release 提供 `assets[].digest`；2023 年之前的老 release 只有字节数基准。
 - 分段下载期间磁盘上同时存在「分片 + 成品」，约需 2 倍资产大小的空闲空间（脚本会先查盘）。
 - 并发不是越多越快：限速节点上 16 段最优、24/32 段回落；不限速节点上单流反而更快。最优值随节点漂移，所以每轮现场测。
-- **<100 MB 或单连接已 ≥3 MB/s 时不测量并发**（直接单流），因为阶梯要 20–26 秒、还可能顺带下载上百 MB 采样流量；想强制测就置 `$ForceLadder = $true`；想改门槛就改正文「可调参数」表与代码里的 `$ladderMinMB` / `$fastKB`（`validate.ps1` 会拦两处不一致）。
+- **<100 MB 或单连接已 ≥3 MB/s 时默认不测量并发**（直接单流），因为阶梯要 20–26 秒、还可能顺带下载上百 MB 采样流量；想强制测就用 `-ForceLadder`，想显式分段就用 `-Parts N`（两者都不再被小资产分支静默吞掉）；想改门槛就改正文「可调参数」表与代码里的 `$ladderMinMB` / `$fastKB`（`validate.ps1` 会拦两处不一致）。
 - 镜像可用性完全取决于当时网络，全灭（全 `000`）是正常结果，此时只能退回直连多段。
 - **`SKILL.md` 只当索引**：0–10 步的 11 个 `powershell` 代码块在 `references/runner-steps.md`，正文只留步骤说明与指针（`SKILL.md` 有 65,536 字节硬上限，宿主超限会直接拒收）。新增代码改 `references/runner-steps.md` 再跑 `build-runner.ps1`；新增说明优先放 `references/`。`validate.ps1` 会在 `SKILL.md` 超过 48 KB 时提示拆分。
 - **`--parallel` 不是默认路径，是有意的**：单进程 `--parallel` 跑 16 段实测 31.6s，同资产多进程自适应 32.3s，差值在噪声内；但 `--parallel -K` 只能整批跑完，某段卡死时没法只杀那一段再换源重排队。这套引擎的卖点是「卡住能自愈」，所以宁可用 0.7 秒换可靠性。

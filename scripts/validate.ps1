@@ -111,7 +111,7 @@ else {
       if ($k -notin $allowed) { Warn "frontmatter 有本宿主不认识的字段：$k（DSH 只认 $($allowed -join ', ')）" }
     }
     # frontmatter 只留 name + description + metadata（最小公共集）：严格宿主遇到不认识的键会整条丢弃技能，
-    # 因此触发条件必须写进 description / 正文，而不是 whenToUse；阈值放 metadata 供宿主展示/转发。
+    # 因此触发条件必须写进 description / 正文；whenToUse 不被 DSH 读取，也通不过本校验；阈值放 metadata 供宿主展示/转发。
 
     # ---------- 2b. 正文参数表 与 代码默认值一致 ----------
     # 阈值以正文「可调参数」表为文档侧真源，第 6 步代码里各有一份常量，两处必须同步。
@@ -363,7 +363,7 @@ if ($skillBytes -le 65536) {
   Ok "SKILL.md 体积 $skillBytes 字节（<= 64KB 上限）"
   # 目标形态是「索引 + references」：超过 48KB 说明又往正文塞了代码/长文案，提前提醒
   if ($skillBytes -gt 49152) {
-    Write-Host ("[WARN] SKILL.md 已 $skillBytes 字节（> 48KB）：运行时代码请放 references/runner-steps.md，正文只留步骤说明与指针") -ForegroundColor Yellow
+    Warn ("SKILL.md 已 $skillBytes 字节（> 48KB）：运行时代码请放 references/runner-steps.md，正文只留步骤说明与指针")
   }
 } else { Bad "SKILL.md 已 $skillBytes 字节，超过 64KB 上限（代码放 references/，正文只留指针）" }
 

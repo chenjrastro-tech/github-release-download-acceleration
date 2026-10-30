@@ -174,6 +174,7 @@ if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t13/ok.bin" 2>/dev/null | tr -d ' ')" = 3
 echo "[12] 未知后缀不因冒烟失败"
 OUT=$(run "$WORK/t12" SMOKE=1 -- "$BASE/ok.bin"); RC=$?
 if [ $RC -eq 0 ] && printf '%s' "$OUT" | grep -qE 'smoke=(SKIP|ok)'; then ok "冒烟对 .bin 走 SKIP 不误报"; else bad "后缀冒烟" "rc=$RC"; printf '%s\n' "$OUT" | tail -3; fi
+if printf '%s' "$OUT" | grep -q '"smoke":"SKIP'; then ok "RESULT_JSON 带 smoke 字段"; else bad "RESULT_JSON smoke" "rc=$RC"; printf '%s\n' "$OUT" | tail -3; fi
 
 echo "[14] 403（token/权限/限流的脸）→ 非零退出，不落半成品"
 OUT=$(run "$WORK/t14" -- "$BASE/e403.bin"); RC=$?
@@ -194,6 +195,42 @@ if [ $RC -ne 0 ] && [ ! -s "$WORK/t17/redirect404.bin" ]; then ok "重定向到 
 echo "[18] 服务器谎报：声称 2MB，任何 Range 都回 416 → 不许把 0 字节当成功"
 OUT=$(run "$WORK/t18" PARTS=8 -- "$BASE/lies416.bin"); RC=$?
 if [ $RC -ne 0 ] && [ ! -s "$WORK/t18/lies416.bin" ]; then ok "416 谎言被拦住"; else bad "416 谎言" "rc=$RC size=$(wc -c <"$WORK/t18/lies416.bin" 2>/dev/null)"; printf '%s\n' "$OUT" | tail -4; fi
+
+echo "[19] 小资产 300KB（低于旧 512KB 探测门槛）"
+OUT=$(run "$WORK/t19" -- "$BASE/small.bin"); RC=$?
+if [ $RC -eq 0 ] && has "$OUT" "size=300000" && [ "$(wc -c <"$WORK/t19/small.bin" 2>/dev/null | tr -d ' ')" = 300000 ]; then
+  ok "小资产 300KB 成功落盘"
+else
+  bad "小资产 300KB" "rc=$RC"; printf '%s\n' "$OUT" | tail -6
+fi
+
+echo "[20] 新 manifest（source）续传"
+D20="$WORK/t20/big.bin.parts"
+mkdir -p "$D20"
+printf '%s %s %s\n%s\n' 67108864 8388608 8 "$BASE/big.bin" > "$D20/manifest"
+"$PY" - "$D20" <<'PY'
+import sys
+d = sys.argv[1]
+total, chunk, n = 67108864, 8388608, 8
+pat = bytes(((i * 7 + 3) & 0xFF) for i in range(1024 * 1024))
+def body(start, end):
+    m = end - start + 1
+    base = pat[start % len(pat):] + pat * (m // len(pat) + 2)
+    return base[:m]
+for k in range(n):
+    s0 = k * chunk
+    e0 = min(s0 + chunk, total) - 1
+    need = e0 - s0 + 1
+    take = need if k < 4 else need // 3
+    with open("%s/p%03d.bin" % (d, k), "wb") as f:
+        f.write(body(s0, s0 + take - 1))
+PY
+OUT=$(run "$WORK/t20" PARTS=8 -- "$BASE/big.bin"); RC=$?
+if [ $RC -eq 0 ] && has "$OUT" "RESUME_PLAN:" && [ "$(wc -c <"$WORK/t20/big.bin" 2>/dev/null | tr -d ' ')" = 67108864 ]; then
+  ok "source manifest 续传完整"
+else
+  bad "source manifest 续传" "rc=$RC"; printf '%s\n' "$OUT" | head -6; printf '%s\n' "$OUT" | tail -5
+fi
 
 echo "----------------------------------------"
 if [ $FAIL -eq 0 ]; then echo "TESTS_SH_OK: $PASS 项通过"; exit 0; fi

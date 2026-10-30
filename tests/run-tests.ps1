@@ -7,8 +7,9 @@
     powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Keep   # 保留临时目录排查
     powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Port 19000  # 指定端口
 
-  覆盖：单流 / 幂等 / 强制重下 / 16 段分段 / 续传（manifest）/ 坏分片 / 短包 / 不支持 Range / 全灭路线
-        直链 404 / 死代理端口 / -Parts 64 并发夹取（共 12 组 34 条）
+  覆盖：单流 / 幂等 / 强制重下 / 16 段分段 / 续传（旧+新 manifest）/ 坏分片 / 短包 / 不支持 Range / 全灭路线
+        直链 404 / 死代理端口 / -Parts 64 并发夹取 / 小资产 / OutDir 含空格 / Parts 门控 / 无 digest exe
+        / 单流首候选 0 字节回退（共 22 组）
   不覆盖（需要真实网络或真实磁盘故障）：digest 不匹配、ASSET_NOT_FOUND、磁盘不足、镜像超时
 #>
 [CmdletBinding()]
@@ -141,6 +142,12 @@ try {
   Check ((Get-Item $f4).Length -eq 123456789) '拼装后字节=123456789'
   Check ((Get-FileHash $f4 -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 123456789)) '拼装后 SHA256 正确（跨段无错位）'
   Check (-not (Test-Path (Join-Path $d4 'big.bin.parts'))) '校验通过后分片目录被清掉'
+  $rj4 = [regex]::Match($r.Out, '(?m)^RESULT_JSON:\s*(\{.*\})\s*$')
+  Check ($rj4.Success) '输出 RESULT_JSON'
+  if ($rj4.Success) {
+    $j4 = $rj4.Groups[1].Value | ConvertFrom-Json
+    Check ($j4.engine -eq 'segments' -and [int]$j4.parts -eq 16) 'RESULT_JSON engine=segments/parts=16' "engine=$($j4.engine) parts=$($j4.parts)"
+  }
 
   # ---------- 5) 续传：预置 manifest + 1 个完整段 + 半个段
   "`n[5] 续传（manifest + 已有分片）"
@@ -160,12 +167,27 @@ try {
   $f5 = Join-Path $d5 'big.bin'
   Check ((Get-FileHash $f5 -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 123456789)) '续传结果 SHA256 正确'
 
+  # ---------- 5b) 新 manifest（source）：同样应识别续传
+  "`n[5b] 新 manifest（source）续传"
+  $d5b = Join-Path $Work 'resume-source'
+  $p5b = Join-Path $d5b 'nodash.bin.parts'
+  New-Item -ItemType Directory $p5b -Force | Out-Null
+  '{"schema":2,"total":4194304,"chunk":1048576,"nseg":4,"source":"' + "$Base/nodash.bin" + '","asset":"nodash.bin"}' |
+    Set-Content -LiteralPath (Join-Path $p5b 'manifest.json') -Encoding ASCII
+  & curl.exe -sS -L -o (Join-Path $p5b 'p000.bin') -r '0-1048575' "$Base/nodash.bin"
+  $r = Invoke-Ghdl @('-Url', "$Base/nodash.bin", '-OutDir', $d5b, '-Parts', '4')
+  Check ($r.Code -eq 0) '新 manifest 续传 exit=0' "exit=$($r.Code)"
+  Check (Has $r.Out 'RESUME_PLAN') '新 manifest 识别 RESUME_PLAN'
+  Check (Has $r.Out 'assembled=4194304') '新 manifest 续传后拼装完整'
+  $f5b = Join-Path $d5b 'nodash.bin'
+  Check ((Get-FileHash $f5b -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 4194304)) '新 manifest 续传 SHA256 正确'
+
   # ---------- 6) 坏分片：长度对不上必须报 SEGMENT_SIZE_MISMATCH，且保留分片
   "`n[6] 坏分片（长度不符）"
   $d6 = Join-Path $Work 'badseg'
   $p6 = Join-Path $d6 'big.bin.parts'
   New-Item -ItemType Directory $p6 -Force | Out-Null
-  '{"total":123456789,"chunk":8000000,"nseg":16,"url":"' + "$Base/big.bin" + '","asset":"big.bin"}' |
+  '{"schema":2,"total":123456789,"chunk":8000000,"nseg":16,"source":"' + "$Base/big.bin" + '","asset":"big.bin"}' |
     Set-Content -LiteralPath (Join-Path $p6 'manifest.json') -Encoding ASCII
   # 造一个「比需要的还长」的分片：引擎会跳过它（长度不小于需要），第 9 步核对时必然对不上
   & curl.exe -sS -L -o (Join-Path $p6 'p000.bin') -r '0-8999999' "$Base/big.bin"
@@ -174,6 +196,8 @@ try {
   Check ($r.Code -eq 1) '坏分片 exit=1' "exit=$($r.Code)"
   Check (Has $r.Out 'SEGMENT_SIZE_MISMATCH') '报 SEGMENT_SIZE_MISMATCH'
   Check (Test-Path (Join-Path $d6 'big.bin.parts')) '失败时保留分片以便续传'
+  $mf6 = Get-Content (Join-Path $p6 'manifest.json') -Raw | ConvertFrom-Json
+  Check ([string]$mf6.source -eq "$Base/big.bin") '新 manifest 记录 source' "source=$($mf6.source)"
 
   # ---------- 7) 短包：服务器声明 2MB 只发 700KB，必须由「三方差一」拦下
   "`n[7] 短包"
@@ -305,6 +329,72 @@ try {
       Check (Has $o16 'NO_ROUTE') '503 报 NO_ROUTE（说明探测阶段无可用路线）' ''
     }
     if (-not (Test-Path $d16)) { New-Item -ItemType Directory -Path $d16 -Force | Out-Null }
+  }
+
+  # ---------- 17) 小资产：旧逻辑的 512KB 探测门槛会把它判 NO_ROUTE
+  "`n[17] 小资产 300KB"
+  $d17 = Join-Path $Work 'small'
+  $r = Invoke-Ghdl @('-Url', "$Base/small.bin", '-OutDir', $d17)
+  Check ($r.Code -eq 0) '小资产 exit=0' "exit=$($r.Code)"
+  $f17 = Join-Path $d17 'small.bin'
+  Check ((Test-Path $f17) -and (Get-Item $f17).Length -eq 300000) '小资产字节=300000'
+  Check ((Get-FileHash $f17 -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 300000)) '小资产 SHA256 正确'
+
+  # ---------- 18) OutDir 含空格 + 显式 -Parts 4（<100MB 也要尊重显式段数）
+  "`n[18] OutDir 含空格 + -Parts 4"
+  $d18 = Join-Path $Work 'space dir'
+  $r = Invoke-Ghdl @('-Url', "$Base/ok.bin", '-OutDir', $d18, '-Parts', '4')
+  Check ($r.Code -eq 0) '空格路径分段 exit=0' "exit=$($r.Code)"
+  Check (Has $r.Out 'PARTS_OVERRIDE') '印出 PARTS_OVERRIDE'
+  Check (Has $r.Out 'nseg=4') '<100MB 显式 -Parts 4 生效'
+  $f18 = Join-Path $d18 'ok.bin'
+  Check ((Test-Path $f18) -and (Get-Item $f18).Length -eq 3145728) '空格路径落盘字节=3145728'
+  Check ((Get-FileHash $f18 -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 3145728)) '空格路径 SHA256 正确'
+
+  # ---------- 19) 服务器不支持 Range 时显式 -Parts 必须被忽略，而不是拿整包当分片
+  "`n[19] 无 Range + -Parts 4"
+  $d19 = Join-Path $Work 'norange-parts'
+  $r = Invoke-Ghdl @('-Url', "$Base/norange.bin", '-OutDir', $d19, '-Parts', '4')
+  Check ($r.Code -eq 0) '无 Range + Parts 仍单流成功' "exit=$($r.Code)"
+  Check (Has $r.Out 'PARTS_IGNORED') '印出 PARTS_IGNORED'
+  $f19 = Join-Path $d19 'norange.bin'
+  Check ((Test-Path $f19) -and (Get-Item $f19).Length -eq 1048576) '无 Range 单流字节=1048576'
+
+  # ---------- 20) 无 digest 的 exe 只能校验字节，绝不执行
+  "`n[20] 无 digest 的 exe"
+  $d20 = Join-Path $Work 'fakeexe'
+  $r = Invoke-Ghdl @('-Url', "$Base/fake.exe", '-OutDir', $d20)
+  Check ($r.Code -eq 0) '无 digest exe exit=0' "exit=$($r.Code)"
+  Check (Has $r.Out 'smoke=SKIP_UNVERIFIED_EXE') '印出 smoke=SKIP_UNVERIFIED_EXE（不执行）'
+  Check ((Test-Path (Join-Path $d20 'fake.exe')) -and (Get-Item (Join-Path $d20 'fake.exe')).Length -eq 1024) 'exe 字节=1024'
+
+  # ---------- 21) 单流首选路线 200 后断流（0 字节）必须自动回退
+  # 用 fallback.test 让 runner 不走 LOCAL_TARGET；CURL_HOME 的 resolve 规则只给测试内的
+  # curl 用，把该主机名指到本地服务。fake proxy 占 7890 成为 A 路线，探测快、完整 GET
+  # 只回头不发 body；D 直连 /fallback.bin 的 Range 探测故意慢 300ms。
+  "`n[21] 单流回退（首候选 0 字节）"
+  $proxyPort = 7890
+  if (Test-Port $proxyPort) { throw "PORT_${proxyPort}_BUSY: 单流回退测试需要 127.0.0.1:$proxyPort 空闲" }
+  $home21 = Join-Path $Work 'curlhome'
+  New-Item -ItemType Directory $home21 -Force | Out-Null
+  Set-Content -LiteralPath (Join-Path $home21 '_curlrc') -Value ('resolve = "fallback.test:' + $Port + ':127.0.0.1"') -Encoding ASCII
+  $oldCurlHome = $env:CURL_HOME
+  $env:CURL_HOME = $home21
+  $fakeProxy = Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $Root 'tests\fake-proxy.ps1'), '-Port', "$proxyPort" -WindowStyle Hidden -PassThru
+  try {
+    $n = 0
+    while (-not (Test-Port $proxyPort) -and $n -lt 50) { Start-Sleep -Milliseconds 100; $n++ }
+    if (-not (Test-Port $proxyPort)) { throw "FAKE_PROXY_START_FAILED: 127.0.0.1:$proxyPort" }
+    $d21 = Join-Path $Work 'singlefallback'
+    $r = Invoke-Ghdl @('-Url', "http://fallback.test:$Port/fallback.bin", '-OutDir', $d21)
+    Check ($r.Code -eq 0) '单流回退后 exit=0' "exit=$($r.Code)"
+    Check (Has $r.Out 'SINGLE_ROUTE_FALLBACK') '印出 SINGLE_ROUTE_FALLBACK'
+    $f21 = Join-Path $d21 'fallback.bin'
+    Check ((Test-Path $f21) -and (Get-Item $f21).Length -eq 3145728) '回退后落盘字节=3145728'
+    Check ((Get-FileHash $f21 -Algorithm SHA256).Hash.ToLower() -eq (Get-ExpectedHash 3145728)) '回退后 SHA256 正确'
+  } finally {
+    if ($fakeProxy) { Stop-Process -Id $fakeProxy.Id -Force -ErrorAction SilentlyContinue }
+    $env:CURL_HOME = $oldCurlHome
   }
 } finally {
   if ($ownServer) { Stop-Process -Id $ownServer.Id -Force -ErrorAction SilentlyContinue }
