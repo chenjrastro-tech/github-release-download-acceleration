@@ -397,26 +397,31 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 ## 变更记录
 
-### 0.3.5（2026-10-31，未发布）
+### 0.3.4（2026-10-31）
 
-- **显式 digest（`-Sha256` / `SHA256_EXPECT`）**：GitHub API 匿名 60 次/小时，被限流时拿不到 `digest`，此前只能退化成「只校验字节数」。现在可以把 release 页上的 sha256 直接传进来，两端都会先走完整 SHA256 闭环再报 `DOWNLOAD_VERIFIED_OK`。
-- **机器可读结论 `RESULT_JSON:`**：两个 runner 最后都打一行单行 JSON（`asset/bytes/total/sha256/expected/verified/engine/parts/route/elapsed_s/avg_mbps/smoke`），agent 不用再拿正则去猜自然语言。
+**体积**：`SKILL.md` 650 行的正文里塞了 11 个 `powershell` 代码块，撞到宿主 65,536 字节硬上限（改进器直接报 `SKILL.md is too large (max 65536 bytes)`，技能本身也可能被拒收）。把 0–10 步的代码块移到 `references/runner-steps.md`，正文只留步骤说明与指针：正文从 65,383 降到 35,980 字节，本轮后续补充文档后为 49,884 字节（仍比原来少 24%）。`build-runner.ps1` 改为从 `references/runner-steps.md` 取块（新参数 `-StepsMd`），生成的 `scripts/ghdl.ps1` 除文件头两行外逐字节不变；`validate.ps1` 改为两份都扫，并检查 references 的存在性 / ≥11 块 / LF。
 
-macOS/Linux 版 `ghdl.sh` 与 Windows 版对齐到同一套行为，并修掉只在 POSIX/真机路径上暴露的问题：
+**多资产隔离（真 bug）**：分片目录原来固定是 `<OutDir>\_dl_parts`，同一目录并发下两个资产会互相覆盖分片，孤儿清理还会顺手杀掉另一个下载的 curl。现在按资产名建子目录（`<OutDir>\<asset>.parts`），Windows 侧与 POSIX 侧一致。
 
-- **阶梯同口径**：1/16 两档各跑三遍取中位数，再要求快 1.25 倍且 16 段那档 16/16 全部完成才分段（此前 sh 只跑一遍，单次 1MB 探针噪声能把结论翻来覆去）。
+**没有 `curl` 时的降级（原来只是嘴上说）**：`NO_CURL` 的报错文案一直写着「Windows 用 `Invoke-WebRequest` 单流降级」，但代码里根本没有这个分支。现在真补上了，打印 `IWR_FALLBACK` 并走单流落地；POSIX 仍明确停下。
+
+**显式 digest**：GitHub API 匿名 60 次/小时，被限流时拿不到 `digest`，此前只能退化成「只校验字节数」。现在可以用 `-Sha256`（PowerShell）/ `SHA256_EXPECT`（POSIX）把 release 页上的 sha256 直接传进来，走完整闭环再报 `DOWNLOAD_VERIFIED_OK`。
+
+**机器可读结论**：两个 runner 最后都打一行 `RESULT_JSON:`（`asset/bytes/total/sha256/expected/verified/engine/parts/route/elapsed_s/avg_mbps/smoke`），agent 不用再拿正则猜自然语言。
+
+**macOS/Linux 版对齐 Windows 版**：
+- **阶梯同口径**：1/16 两档各跑三遍取中位数，要求快 1.25 倍且 16 段那档 16/16 全部完成才分段（此前只跑一遍，单次 1MB 探针噪声能把结论翻来覆去）。
 - **并发爬坡/回退**：`RAMP_UP` 逐级加并发、`BACKOFF` 有 2 段卡住就停手；起始并发按「阶梯结论 / 单连接是否被限速」决定（此前一上来 16 条，节点重置时全军覆没）。
 - **进度输出**：每 4 秒一行 `progress=…MB/…MB (…%) running=… rate=…KB/s`，与 Windows 版一致。
-- **端口探测并行**：全部端口同时发起、最多等 3 秒、按优先级挑；删掉「把端口当代理 curl 一下」的兜底——它在 Windows 上每个关闭端口要 2 秒，20 个端口 = 40 秒白等（本地 64MB 用例从 23.9 s 回到 9.4 s）。
-- **探针解析修正**：curl「收到一部分再超时」时旧写法会把两行输出拼在一起、六列错位，实测导致选错路线、代理字段变成 `0.0.0.0`；改为先取第一行再判。
+- **端口探测并行**：全部端口同时发起、最多等 3 秒、按优先级挑；删掉「把端口当代理 curl 一下」的兜底——它在 Windows 上每个关闭端口要 2 秒，20 个端口 = 40 秒白等（本地 64MB 用例 23.9 s → 9.4 s）。端口表同时扩到 20 个（含 7892–7896、7899、1081、8118、9090）。
+- **探针解析修正（真 bug）**：curl「收到一部分再超时」时旧写法会把两行输出拼在一起、六列错位，实测导致选错路线、代理字段变成 `0.0.0.0`；改为先取第一行再判。
 - **进度采样**：`du -sk` 一次遍历替代逐文件 `wc -c`（后者会被正在写的分片拖住）。
 
-### 0.3.4（2026-10-30）
+**故障注入补齐**：`tests/serve.ps1` 增加 `/e403.bin`、`/e503.bin`（带 `Retry-After: 1`）、`/e429.bin` 三个永远返回同一状态码的端点；套件 [16] 断言这几种情况必须 **非 0 退出、输出里能看到状态码、不留半成品文件、30 秒内快速失败**。至此 ps1 套件 15 组 46 条 → **16 组 59 条**，与 sh 侧的故障注入对齐。
 
-- **`SKILL.md` 拆分，正文 65,383 → 35,246 字节（-46%）**：0–10 步的 11 个 `powershell` 代码块移到 `references/runner-steps.md`，正文只留步骤说明与指针。起因是宿主侧 65,536 字节硬上限——超限时改进器直接报 `SKILL.md is too large (max 65536 bytes)`，技能自身也可能被拒收。
-- `scripts/build-runner.ps1` 改为从 `references/runner-steps.md` 取块（新参数 `-StepsMd`，默认指向该文件）；`scripts/ghdl.ps1` 重新生成后除文件头两行说明外逐字节不变。
-- `validate.ps1`：新增 `references/runner-steps.md` 存在性 / ≥11 个 powershell 块 / LF 检查；代码块静态检查改为「SKILL.md + references 都扫」；镜像清单一致性改从 runner 真源读；体积判定从「64 KiB 上限 + 余量 <2 KB 提醒」改为「>48 KB 提示继续拆分」。
-- README 目录树、生成器说明、限制段同步更新。
+**本地基准入库**：新增 `tests/bench.ps1`，对同一资产跑「强制单流」与「强制 16 段」各 N 遍取中位数，并接进 Windows CI。回环实测单流 392.5 MB/s vs 16 段 107.0 MB/s（0.27×）——它证明的是「不限速时多段只是多付开销」，不是公网加速比。
+
+**未变**：下载主路径（range 分段、并发调度、拼装与 SHA256）一行没改。所以「每连接被限速时靠多段提速」的能力与 0.3.3 完全相同；本轮是可靠性与可验证性升级，不是加速升级。
 
 ### 0.3.3（2026-10-30）
 
