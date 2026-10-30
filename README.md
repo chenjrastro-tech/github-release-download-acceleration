@@ -133,7 +133,7 @@ powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://example.com/big.bin'
 - **失败保留现场**：校验没过时分片不删（`PARTS_KEPT`），下次接着下；确认不要了再加 `-ForceClean`。
 
 ```sh
-# macOS / Linux：行为对齐 ps1，仅在 Git Bash 上验过（真机 mac/Linux 未实测，见「支持矩阵」）
+# macOS / Linux：行为对齐 ps1；CI 的 ubuntu-latest 与 macos-latest 均跑过 17 条 sh 套件
 sh scripts/ghdl.sh '<release 直链>'
 sh scripts/ghdl.sh '<release 直链>' -o /tmp/dl -p 16      # 选项与环境变量等价，选项优先
 sh scripts/ghdl.sh --help                                  # 全部选项
@@ -338,8 +338,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 # VALIDATE_OK: 0 个错误 / 0 个告警
 ```
 
-GitHub Actions（`.github/workflows/test.yml`，尚未并入 main，见变更记录）在 push / PR 时自动跑同一套：Windows 侧 `validate.ps1` + `build-runner -Check` + `run-tests.ps1`，
-Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通不等于 CI 也通（首次运行请以 Actions 页面为准）。
+GitHub Actions（`.github/workflows/test.yml`，已并入 `main`）在 push / PR 时自动跑同一套：Windows 侧 `validate.ps1` + `build-runner -Check` + `run-tests.ps1`，
+Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
+
+2026-10-30 首次真跑：**Windows / Ubuntu / macOS 三个 job 全部 success**（run 41049031624，commit `dcf333c`）。macOS 那次跑在自带的 bash 3.2 + BSD 工具链上，一次抓出四个只在 BSD/bash 3.2 下才犯的错（`${arr[@]}` 空数组在 `set -u` 下 unbound、`wc -c` 输出前导空格、BSD `sed`/`awk` 处理中文报多字节错、`$VAR` 后面直接跟中文被当成变量名的一部分），全部修完后才绿。
 
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
@@ -355,10 +357,10 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通
 - 新增**单文件自举** `scripts/ghdl-min.sh`（86 行 POSIX sh，无数组/无 `[[ ]]`）：取总长 → ≥32MB 走 8 段并发（不齐自动回落单流）→ 单流 `-C -` 续传 → 字节校验 → 可选 SHA256 三级降级。`SKILL.md` 内联同一份，`validate.ps1` 逐字比对。
 - `scripts/ghdl.sh` 补**与 ps1 对齐的命令行选项**：`-o/--outdir`、`-p/--parts`、`--force-clean`、`--force-ladder`、`--smoke 0|1`、`--keep-tmp`、`--help`；未知选项 `UNKNOWN_FLAG` exit 2（不会静默当 URL）。
 - 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 37 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 17 条 sh 套件。
-  **注意**：这份工作流当前在本地分支 `ci-workflow`，还没进 `main`——`gh` 的 token 只有 `repo`/`gist`/`read:org`，GitHub 拒绝「无 `workflow` scope 的 OAuth 应用创建/更新工作流」。要启用它：`gh auth refresh -s workflow` 后推送该分支（或网页上传）。
+  推送它需要 token 带 `workflow` scope（`gh auth refresh -s workflow`），已补；工作流已并入 `main`，三平台 job 全绿。
 - `SKILL.md` 的「小文件/文本走 contents API」拆到 `references/fetch-raw-via-api.md`（正文只留 3 行指针）：`SKILL.md` 有 64KB 上限，现在 **64,433 B**，`validate.ps1` 会拦超限。
 - `curl --parallel` **评估后不采纳**（理由写在 `SKILL.md` Verification）：本仓引擎已多进程 + 逐段自愈 + 多源混拨，`--parallel -K` 只能整批跑、单段失败无法只重排那一段，收益在噪声内。
-- **未实测**：macOS/Linux 真机（CI 是首次覆盖，本轮未等到 CI 结果）；bsd `nc -z`、`openssl -r`、`unzip -tqq`、`ulimit` 抬不动时的降级路径。
+- **未实测**：`openssl dgst -sha256 -r` / `shasum -a 256` 分支（CI 用例都没有 digest，SHA256 走的是 ps1 侧）；`ulimit` 抬不动时的降级；非 bash 的 `dash`/`ksh`。
 
 **0.3.0 发布后（main 分支，未发布）**：几项纯性能收尾，仍记在 **0.3.0** 这个大版本下，不单独升版本号；下一次有大内容更新才用 0.3.1。参照物是已发布的 `0.3.0` tag，同机同资产、轮流跑：
 
@@ -382,7 +384,7 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通
 - **P2 并发引擎**：按单连接实测速度自适应段大小；多源路线池（只收 ≥35% 最快速度的前三条）；工作窃取（某段卡住就杀掉、换路线、续传重排队）；自适应起并发（4 起步，吞吐涨 15% 加 2、3 秒内卡 2 段砍半）；`curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`）。同机同一资产：单流 31.2s / 自适应 32.3s / `--parallel` 31.6s / 杀段恢复 30.7s，全部字节精确。
 - **P3 可靠性**：任意 https 直链（自建 CDN、GitLab、内网制品库都行，用 1 字节 range 的 `Content-Range` 反推总长，只做字节校验）；断点续传 + 幂等（`_dl_parts/manifest.json` 记住分段方案，重跑沿用并跳过已下分片，成品已完整则 `ALREADY_DONE`）；孤儿进程收尾（先 `ORPHANS_KILLED` 再开工，杜绝两个进程写同一分片——实测写坏过 4.9MB）；逐段强校验（每段长度必须等于 `end-start+1`，否则 `SEGMENT_SIZE_MISMATCH` 并保留现场）；退出码只有真校验通过才是 0；`-ForceClean` / `-KeepParts`。
 - **单流「三方差一」**：下完比对响应头 `Content-Length` 与 `total`，不等即 `SIZE_MISMATCH`（短包不再靠运气）；重定向链上取最后一个 `Content-Length`。
-- **POSIX `ghdl.sh`**：直链、续传（`.parts/manifest`）、幂等、`FORCE_CLEAN=1`、孤儿清理（`pgrep -f`，Windows 上无 `pgrep` 时降级），三级 `sha256sum`/`shasum`/`openssl` 降级。**只做到「Git Bash 跑通 + 部分验证」，真 macOS/Linux 未实测。**
+- **POSIX `ghdl.sh`**：直链、续传（`.parts/manifest`）、幂等、`FORCE_CLEAN=1`、孤儿清理（`pgrep -f`，Windows 上无 `pgrep` 时降级），三级 `sha256sum`/`shasum`/`openssl` 降级。**Git Bash、ubuntu-latest、macos-latest 三处都跑过 17 条 sh 套件（CI 绿）；`dash` 等非 bash shell 未测。**
 - **段粒度**：段数上限 64 → 128，让 1–3GB 资产的段大小仍守在 24MB 内。实测：1.2GB Godot 资产 `-Parts 8` → 49 段 / 23.4MB，SHA256 与 digest 一致；本地 1.75GB → 75 段 / 10.8s。
 - **证据与回归**：真零前置实测（PATH 只剩系统目录、清空代理环境变量、非管理员，仍靠端口探测选中代理下载并校验通过）；`tests/run-tests.ps1` 13 组 37 条离线断言（含直链 404、死代理端口、`-Parts 64` 并发夹取），套件开跑前先验明端口上确实是本仓库的 `serve.ps1`，否则明确报错。
 
@@ -395,7 +397,7 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通
 ## 限制
 
 - **Windows 完整支持**：依赖 `curl.exe` 与 Windows PowerShell 5.1，脚本写法（无 `-Parallel`、数组传参不加引号）按 5.1 的脾性来；端口探测用 `TcpClient`，不再依赖 `Get-NetTCPConnection`/注册表/`cmd mklink`。
-- **POSIX 部分验证**：`scripts/ghdl.sh` 在 Git Bash 里跑通单流、16 段拼装与续传；真 macOS/Linux（含 dash/BSD sh）未实测，不要当成「已支持」。
+- **POSIX 验证边界**：`scripts/ghdl.sh` 在 Git Bash、ubuntu-latest、macos-latest 上回归通过（bash 3.2/5.x + BSD/GNU 工具）；`dash` 等非 bash shell 未测。
 - SHA256 闭环要求 release 提供 `assets[].digest`；2023 年之前的老 release 只有字节数基准。
 - 分段下载期间磁盘上同时存在「分片 + 成品」，约需 2 倍资产大小的空闲空间（脚本会先查盘）。
 - 并发不是越多越快：限速节点上 16 段最优、24/32 段回落；不限速节点上单流反而更快。最优值随节点漂移，所以每轮现场测。

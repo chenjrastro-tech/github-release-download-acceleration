@@ -841,9 +841,9 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 | 能力 | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | `scripts/ghdl.ps1`（生成物） | 已实测：fzf 1.86MB / OBS 213MB / rclone 31.6MB / Godot 1.2GB，含 `-Parts`、`-ForceClean`、续传、截断、无 Range、404 | 不适用（PowerShell 5.1 专属） | 不适用 |
-| `scripts/ghdl.sh`（手写） | 部分验证：Git Bash 上单流/8 段/续传/无 Range/404/截断/P2SP 全过（`tests/run-tests-sh.sh`） | **未实测**：脚本按 macOS 自带 bash 3.2 + BSD 工具写，`nc -z`/`openssl -r`/`unzip -tqq` 的 BSD 行为未在真机跑过 | **未实测**，同上 |
-| 环境探测（端口/代理/内核） | 已实测 | 部分（`nc` 分支未在真机跑） | 部分 |
-| 三重校验（字节 + SHA256 + 冒烟） | 已实测 | 部分（`openssl`/`shasum` 分支未在真机跑） | 部分 |
+| `scripts/ghdl.sh`（手写） | 已实测：Git Bash 上 sh 套件 17 条全过 | 已实测：GitHub Actions `macos-latest`（bash 3.2 + BSD 工具）sh 套件 17 条全过 | 已实测：GitHub Actions `ubuntu-latest` sh 套件 17 条全过 |
+| 环境探测（端口/代理/内核） | 已实测 | 已实测（CI，`nc` 分支） | 已实测（CI） |
+| 三重校验（字节 + SHA256 + 冒烟） | 已实测 | 部分：字节校验已实测，`openssl`/`shasum` 分支仅 CI 未覆盖 digest | 同上 |
 
 ## 维护与自检（改完必跑）
 
