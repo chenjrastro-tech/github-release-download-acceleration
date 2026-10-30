@@ -361,7 +361,7 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 ## 变更记录
 
-### 0.3.1（未发布）
+### 0.3.1（2026-10-30）
 - 新增 POSIX runner `scripts/ghdl.sh`（macOS/Linux），行为对齐 ps1：`nc` 探端口、`ulimit -n 4096`、哈希降级链、队列锁 worker 池、单段自愈、逐段强校验、manifest 续传、P2SP 双源混拨、`--connect-timeout 3` + `--speed-limit/--speed-time` 掐死慢段、不支持 Range 秒退单流、按后缀冒烟。
 - 新增 `tests/serve.py` + `tests/run-tests-sh.sh`（8 组 18 断言，离线确定性）；Windows 侧套件已到 37 断言。
 - SKILL.md 增加「环境分发」「可调参数」「支持矩阵」三节；阈值四处一致性纳入 `validate.ps1`（2c 段）。
@@ -374,11 +374,16 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
   推送它需要 token 带 `workflow` scope（`gh auth refresh -s workflow`），已补；工作流已并入 `main`，三平台 job 全绿。
 - `SKILL.md` 的「小文件/文本走 contents API」拆到 `references/fetch-raw-via-api.md`（正文只留 3 行指针）：`SKILL.md` 有 64KB 上限，现在 **64,433 B**，`validate.ps1` 会拦超限。
 - `curl --parallel` **评估后不采纳**（理由写在 `SKILL.md` Verification）：本仓引擎已多进程 + 逐段自愈 + 多源混拨，`--parallel -K` 只能整批跑、单段失败无法只重排那一段，收益在噪声内。
-- **未实测**：`openssl dgst -sha256 -r` / `shasum -a 256` 分支（CI 用例都没有 digest，SHA256 走的是 ps1 侧）；`ulimit` 抬不动时的降级；非 bash 的 `dash`/`ksh`。
+- **三平台 CI 真跑全绿**：Windows / `ubuntu-latest` / `macos-latest` 三个 job 都实跑通过。macOS job 跑在自带 bash 3.2 + BSD 工具链上，一次抓出四类只在 BSD 下才犯的错（`${arr[@]}` 空数组在 `set -u` 下 unbound、`wc -c` 输出前导空格、BSD `sed`/`awk` 处理多字节报错、`$VAR` 后直接跟中文被并进变量名），修完才绿。
+- **端口探测三段式**：`nc -z` → bash `/dev/tcp` → `curl -x` 当代理试连。Git Bash 没有 `nc`，旧回退 `curl http://端口` 会被代理端口（对普通 GET 不回应）判成「没在听」，真机下载直接 `NO_ROUTE`。
+- **修 `exec` 吞掉 stderr**：`port_open` 里 `exec 3>&- 3<&- 2>/dev/null` 改的是当前 shell 的重定向，之后整个脚本的报错全部消失（排查时表现为「只有前半段输出」）。
+- **镜像清单两端一致**：`SKILL.md` 列 7 条（含 `hk.gh-proxy.com`），`ghdl.sh` 只测 6 条 —— 现在对齐，且 `validate.ps1` 新增检查，只改一边直接 FAIL。
+- sh 套件扩到 **18 条**（新增「环境残留死代理不影响本机目标」）；README 补「两端参数对照」表，写清 `-KeepParts` ↔ `--keep-tmp`、`-Smoke` 为什么故意不提供。
+- **仍未实测**：`openssl dgst -sha256 -r` / `shasum -a 256` 分支（CI 用例的资产都没有 digest）；`ulimit` 抬不动时的降级；`dash`/`ksh`（CI 只覆盖 bash）；3GB 以上的段大小只有公式推导。
 
-**0.3.0 发布后（main 分支，未发布）**：几项纯性能收尾，仍记在 **0.3.0** 这个大版本下，不单独升版本号；下一次有大内容更新才用 0.3.1。参照物是已发布的 `0.3.0` tag，同机同资产、轮流跑：
+**0.3.0 之后的性能收尾（已随 0.3.1 发布）**：参照物是 `v0.3.0` tag，同机同资产、轮流跑：
 
-| 场景 | 0.1.0 | 0.3.0（已发布） | main（0.3.0 + 未发布收尾） |
+| 场景 | 0.1.0 | 0.3.0 | 0.3.1 |
 |---|---|---|---|
 | 本地限速服务器 105MB（每连接 1.2MB/s，确定性） | 47.4s / 47.3s | 46.8s / 46.7s | **40.7s / 40.6s** |
 | 真实 rclone 30.2MB | 19.8s / 16.3s | 22.5s / 19.6s | **14.0s** |
