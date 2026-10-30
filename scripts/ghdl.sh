@@ -228,7 +228,7 @@ else
     if [ -z "$asset" ]; then
       asset=$(printf '%s' "$api_body" | grep -o '"name": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n1)
       [ -n "$asset" ] || { echo "ASSET_NOT_FOUND: release 里没有资产" >&2; exit 1; }
-      echo "asset=$asset（URL 未指定，取第一个资产）"
+      echo "asset=${asset}（URL 未指定，取第一个资产）"
     fi
     names=$(printf '%s' "$api_body" | grep -o '"name": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
     if ! printf '%s\n' "$names" | grep -Fxq "$asset"; then
@@ -253,7 +253,7 @@ else
   elif [ "$api_code" = "000" ]; then
     echo "ASSET_UNVERIFIED: API 不可达，按 URL 继续，只做字节校验"
   else
-    echo "API_UNEXPECTED: code=$api_code，按 URL 继续" >&2
+    echo "API_UNEXPECTED: code=${api_code}，按 URL 继续" >&2
   fi
 fi
 
@@ -267,7 +267,7 @@ IS_LOCAL=0
 case "$host" in
   localhost|127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) IS_LOCAL=1 ;;
 esac
-[ "$IS_LOCAL" = "1" ] && echo "LOCAL_TARGET: 目标是本机/内网地址（$host），跳过代理与公共镜像"
+[ "$IS_LOCAL" = "1" ] && echo "LOCAL_TARGET: 目标是本机/内网地址（${host}），跳过代理与公共镜像"
 
 # ---------- 3. 选路：每条路线真跑一次 1MB Range ----------
 : > "$TMPD/probes"
@@ -434,7 +434,7 @@ elif [ "$big_enough" = "1" ] && [ "$single_kbps" -lt "$FAST_KBPS" ]; then
 else
   rung1="1|0|0"; rung16="16|0|0"
   tmb=$(awk -v t="${TOTAL:-0}" 'BEGIN{ if (t<=0) print "unknown"; else printf "%.1f", t/1048576 }')
-  echo "SKIP_LADDER: total=${tmb}MB singleKB=$single_kbps（门槛 ${LADDER_MIN_MB}MB / ${FAST_KBPS}KB/s）-> 单流"
+  echo "SKIP_LADDER: total=${tmb}MB singleKB=${single_kbps}（门槛 ${LADDER_MIN_MB}MB / ${FAST_KBPS}KB/s）-> 单流"
 fi
 
 k1=$(printf '%s' "$rung1" | cut -d'|' -f2)
@@ -552,9 +552,9 @@ dl_segment() { # $1=idx
     [ -f "$part" ] && total_now=$(wc -c < "$part" | tr -d ' ')
     if [ "$total_now" -eq "$need" ]; then return 0; fi
     try=$((try + 1))
-    echo "SEG_RETRY: p$idx try=$try have=$total_now/$need（换下一条路线）"
+    echo "SEG_RETRY: p$idx try=$try have=$total_now/${need}（换下一条路线）"
   done
-  echo "SEGMENT_FAILED: p$idx 重试 $MAX_TRIES 次仍不足（need=$need）" >&2
+  echo "SEGMENT_FAILED: p$idx 重试 $MAX_TRIES 次仍不足（need=${need}）" >&2
   return 1
 }
 
@@ -635,11 +635,11 @@ elif [ "$winN" -gt 1 ] && [ "${TOTAL:-0}" -gt 0 ]; then
     j=$((j+1))
   done
   if [ -n "$bad" ]; then
-    echo "SEGMENT_SIZE_MISMATCH:$bad（分片留在 $PARTS_DIR，重跑会续传）" >&2
+    echo "SEGMENT_SIZE_MISMATCH:${bad}（分片留在 ${PARTS_DIR}，重跑会续传）" >&2
     exit 1
   fi
   if [ "$sum" -ne "$TOTAL" ]; then
-    echo "PARTS_MISMATCH: sum=$sum total=$TOTAL（分片留在 $PARTS_DIR）" >&2
+    echo "PARTS_MISMATCH: sum=$sum total=${TOTAL}（分片留在 ${PARTS_DIR}）" >&2
     exit 1
   fi
   echo "partsBytes=$sum total=$TOTAL ok=True"

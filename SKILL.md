@@ -126,7 +126,7 @@ if [ "$total" -ge 33554432 ]; then  # >=32MB 才分段，小文件单流更稳
     while [ $i -lt 8 ]; do cat "$tmpd/p$i.bin" >> "$dst"; i=$((i + 1)); done
     rm -rf "$tmpd"; echo "MIN_SEG_OK"
   else
-    echo "MIN_SEG_FALLBACK: 分片不齐（$sum/$total），改单流重下"; rm -rf "$tmpd"
+    echo "MIN_SEG_FALLBACK: 分片不齐（$sum/${total}），改单流重下"; rm -rf "$tmpd"
   fi
 fi
 

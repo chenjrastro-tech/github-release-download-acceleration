@@ -165,7 +165,7 @@ while IFS= read -r _line; do
 done <<EOF
 $OUT
 EOF
-if [ $RC -eq 0 ] && [ -n "$KEPT" ] && [ -d "$KEPT" ]; then ok "临时目录被保留（$KEPT）"; rm -rf "$KEPT"; else bad "KEEP_TMP" "rc=$RC kept=$KEPT"; fi
+if [ $RC -eq 0 ] && [ -n "$KEPT" ] && [ -d "$KEPT" ]; then ok "临时目录被保留（${KEPT}）"; rm -rf "$KEPT"; else bad "KEEP_TMP" "rc=$RC kept=$KEPT"; fi
 
 echo "[12] 未知后缀不因冒烟失败"
 OUT=$(run "$WORK/t12" SMOKE=1 -- "$BASE/ok.bin"); RC=$?
