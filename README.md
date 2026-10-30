@@ -133,7 +133,7 @@ powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://example.com/big.bin'
 - **失败保留现场**：校验没过时分片不删（`PARTS_KEPT`），下次接着下；确认不要了再加 `-ForceClean`。
 
 ```sh
-# macOS / Linux：脚本已就绪但在真实 mac/Linux 上未实测（只在 Windows Git Bash 跑通，见「支持矩阵」）
+# macOS / Linux：行为对齐 ps1，仅在 Git Bash 上验过（真机 mac/Linux 未实测，见「支持矩阵」）
 sh scripts/ghdl.sh '<release 直链>'
 ```
 
@@ -213,6 +213,29 @@ API_RATE_LIMITED: GitHub API 403 rate limit exceeded for <ip> → 无 digest
 DOWNLOAD_SIZE_OK_NO_DIGEST
 ```
 
+### 跨平台：Windows 与 macOS 两个 runner
+
+| 平台 | 入口 | 依赖 |
+| --- | --- | --- |
+| Windows | `scripts\ghdl.ps1 -Url '<url>' [-OutDir <目录>] [-Parts 16] [-ForceClean] [-KeepParts] [-ForceLadder]` | 系统自带 `curl.exe`（Win10 1803+） |
+| macOS / Linux | `bash scripts/ghdl.sh '<url>'` | 系统自带 `curl`；SHA256 走 `openssl` → `shasum` → `sha256sum` |
+
+```bash
+# macOS/Linux：参数走环境变量
+OUTDIR=$HOME/Downloads PARTS=16 bash scripts/ghdl.sh 'https://github.com/owner/repo/releases/download/v1.2.3/a.zip'
+MIN_KBPS=200 P2SP_URLS='https://cdn.example.com/a.zip' bash scripts/ghdl.sh '<url>'   # 3 秒内 <200KB/s 就掐断换源，并与备源混拨
+```
+
+两边共用同一套阈值：frontmatter `metadata`、正文「可调参数」表、ps1 的 `$ladderMinMB`/`$fastKB`、sh 的 `LADDER_MIN_MB`/`FAST_KBPS`，四处不一致 `validate.ps1` 直接 FAIL。
+
+macOS 侧的实现差异（都写进脚本头部注释）：
+
+- `nc -z -w 1` 探端口（无 `nc` 回退 curl），不用 `/dev/tcp`；
+- `ulimit -n 4096`，抬不上去打印 `ULIMIT_SKIP` 继续；
+- `--http2`/`--buffer-size`/`--proxy-http2` 先用 `curl <opt> --version` 探测运行时是否支持（本机 curl 8.22 的 `--help` 会骗人）；
+- worker 池用队列文件 + `mkdir` 原子锁，`xargs -P` 做不了单段自愈；
+- 冒烟按后缀：`.zip`→`unzip -tqq`、`.tar.*`→`tar -tf`、`.exe` 在 macOS 上 `smoke=SKIP`。
+
 ## 实测效果
 
 同一台机器、同一个 213.4MB 资产（obs-studio 33.0.0 Windows x64）：
@@ -272,6 +295,11 @@ metadata:
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 # 端口默认自动挑空闲的；要复现/排查时指定：-Port 19000
 # TESTS_OK: 34 项通过
+
+# POSIX runner 的同款离线回归（本地假服务器 + 确定性 SHA256）
+bash tests/run-tests-sh.sh
+# TESTS_SH_OK: 11 项通过   （覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源）
+# Windows 上跑要给真实解释器：PYTHON=C:/path/to/python3 bash tests/run-tests-sh.sh
 ```
 
 `tests/serve.ps1` 用 `TcpListener` 在本机起一个假 Release 服务（支持 Range，也能模拟「只发 700KB 就断」和「根本不支持 Range」），
@@ -307,6 +335,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
 ## 变更记录
+
+### 0.3.1（未发布）
+- 新增 POSIX runner `scripts/ghdl.sh`（macOS/Linux），行为对齐 ps1：`nc` 探端口、`ulimit -n 4096`、哈希降级链、队列锁 worker 池、单段自愈、逐段强校验、manifest 续传、P2SP 双源混拨、`--connect-timeout 3` + `--speed-limit/--speed-time` 掐死慢段、不支持 Range 秒退单流、按后缀冒烟。
+- 新增 `tests/serve.py` + `tests/run-tests-sh.sh`（7 组 11 断言，离线确定性），Windows 侧套件保持 34 断言。
+- SKILL.md 增加「环境分发」「可调参数」「支持矩阵」三节；阈值四处一致性纳入 `validate.ps1`（2c 段）。
+- 修 `-Parts` 语义：现在严格等于「段数」（之前只影响 workers，123MB 资产会退化到 5 段）。
+- 修 worker 池空路线导致的 `Attempted to divide by zero`（`POOL_EMPTY` 明确报错 + `$poolN` 兜底）。
+- **未实测**：macOS/Linux 真机；只在 Windows Git Bash（MINGW64）与 Windows PowerShell 5.1 上跑过。
 
 **0.3.0 发布后（main 分支，未发布）**：几项纯性能收尾，仍记在 **0.3.0** 这个大版本下，不单独升版本号；下一次有大内容更新才用 0.3.1。参照物是已发布的 `0.3.0` tag，同机同资产、轮流跑：
 

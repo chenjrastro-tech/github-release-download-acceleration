@@ -74,7 +74,7 @@ else {
     Bad "frontmatter 没有闭合的 ---"
   }
   else {
-    $allowed = @('name', 'description')
+    $allowed = @('name', 'description', 'metadata')
     $fm = @{}
     $meta = @{}
     for ($i = 1; $i -lt $end; $i++) {
@@ -110,8 +110,8 @@ else {
     foreach ($k in $fm.Keys) {
       if ($k -notin $allowed) { Warn "frontmatter 有本宿主不认识的字段：$k（DSH 只认 $($allowed -join ', ')）" }
     }
-    # frontmatter 只留 name + description（最小公共集）：严格宿主遇到不认识的键会整条丢弃技能，
-    # 因此触发条件必须写进 description / 正文，而不是 whenToUse。
+    # frontmatter 只留 name + description + metadata（最小公共集）：严格宿主遇到不认识的键会整条丢弃技能，
+    # 因此触发条件必须写进 description / 正文，而不是 whenToUse；阈值放 metadata 供宿主展示/转发。
 
     # ---------- 2b. 正文参数表 与 代码默认值一致 ----------
     # 阈值以正文「可调参数」表为文档侧真源，第 6 步代码里各有一份常量，两处必须同步。
@@ -128,6 +128,28 @@ else {
         Bad "参数表 $mk=$declared 与代码 `$$var = $($hit.Groups['n'].Value)` 不一致：改阈值要两处同步"
       }
       else { Ok "`$$var 与参数表 $mk 一致" }
+    }
+
+    # 2c. metadata 与 ghdl.sh 常量也要和参数表一致（跨平台共用同一套阈值）
+    $metaVars = [ordered]@{ 'min_size_for_ladder_mb' = 'LADDER_MIN_MB'; 'single_conn_fast_kbps' = 'FAST_KBPS' }
+    foreach ($mk in $metaVars.Keys) {
+      $rowM = [regex]::Match($skillText, ('(?m)^\|\s*`' + $mk + '`\s*\|\s*(?<v>\d+)\s*\|'))
+      if (-not $rowM.Success) { continue }
+      $declared = [int]$rowM.Groups['v'].Value
+      if ($meta.ContainsKey($mk)) {
+        $mv = $meta[$mk]
+        if ($mv -match '^\d+$' -and [int]$mv -eq $declared) { Ok "metadata.$mk = $declared（与参数表一致）" }
+        else { Bad "metadata.$mk=$mv 与参数表 $declared 不一致：阈值要四处同步（metadata/参数表/ps1/sh）" }
+      }
+      else { Warn "frontmatter 的 metadata 缺少 $mk" }
+      $shPath = Join-Path $SkillRoot 'scripts\ghdl.sh'
+      if (Test-Path $shPath) {
+        $shVar = $metaVars[$mk]
+        $shM = [regex]::Match([IO.File]::ReadAllText($shPath), ('(?m)^' + $shVar + '=\$\{' + $shVar + ':-([0-9]+)\}'))
+        if (-not $shM.Success) { Warn "ghdl.sh 里找不到 $shVar 的默认值" }
+        elseif ([int]$shM.Groups[1].Value -ne $declared) { Bad "ghdl.sh 的 $shVar=$($shM.Groups[1].Value) 与参数表 $declared 不一致" }
+        else { Ok "ghdl.sh $shVar 与参数表一致" }
+      }
     }
   }
 }

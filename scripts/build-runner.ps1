@@ -34,10 +34,10 @@ if (-not $OutFile) { $OutFile = Join-Path $here 'ghdl.ps1' }
 $md = [IO.File]::ReadAllText($SkillMd)
 $rx = [regex]'(?ms)^[ \t]*```powershell[ \t]*\r?\n(?<code>.*?)^[ \t]*```'
 $blocks = @($rx.Matches($md) | ForEach-Object { $_.Groups['code'].Value -replace "`r`n", "`n" })
-if ($blocks.Count -lt 12) { throw "SKILL.md 只找到 $($blocks.Count) 个 powershell 块，至少要 12 个（0–11 步）" }
+if ($blocks.Count -lt 11) { throw "SKILL.md 只找到 $($blocks.Count) 个 powershell 块，至少要 11 个（0–10 步）" }
 
-# 只取 0–11 步；12 起是报告模板/辅助片段，不属于 runner
-$flow = $blocks[0..11]
+# 只取 0–10 步；11 起是 raw/contents 取数片段与维护自检片段，不属于 runner
+$flow = $blocks[0..10]
 
 # --- 三处替换（匹配不到就报错，避免 SKILL.md 改结构后静默生成坏文件）
 function Replace-Once([string]$text, [string]$pattern, [string]$replacement, [string]$what) {
@@ -49,12 +49,12 @@ function Replace-Once([string]$text, [string]$pattern, [string]$replacement, [st
 
 $flow[0] = Replace-Once $flow[0] '(?m)^[ \t]*\$u[ \t]*=[^\n]*\n' '' '第 0 块的示例 URL 赋值（$u = ...）'
 $flow[6] = Replace-Once $flow[6] '(?m)^[ \t]*\$ForceLadder[ \t]*=[ \t]*\$false[ \t]*$' '$ForceLadder = [bool]$ForceLadderSwitch' '第 6 块的 $ForceLadder = $false'
-$flow[7] = Replace-Once $flow[7] '(?m)^[ \t]*\$base[ \t]*=[ \t]*Join-Path[^\n]*$' '$base = $OutDir' '第 7 块默认 Downloads 路径'
+$flow[7] = Replace-Once $flow[7] '(?m)^[ \t]*\$base[ \t]*=.*\$OutDir.*$' '$base = $OutDir' '第 7 块的 $base 输出目录默认值（含 $OutDir 判断）'
 
 $head = @"
 <#
   ghdl.ps1 —— GitHub Release 大资产下载（一次性 runner）
-  由 scripts/build-runner.ps1 从 SKILL.md 的 0-11 步代码块自动生成，请勿手改：
+  由 scripts/build-runner.ps1 从 SKILL.md 的 0-10 步代码块自动生成，请勿手改：
   想改逻辑就改 SKILL.md，然后重跑  powershell -NoProfile -File scripts\build-runner.ps1
 
   用法：

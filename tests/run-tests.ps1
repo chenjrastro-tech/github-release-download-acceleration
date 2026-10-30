@@ -126,7 +126,7 @@ try {
   $d4 = Join-Path $Work 'seg'
   $r = Invoke-Ghdl @('-Url', "$Base/big.bin", '-OutDir', $d4, '-Parts', '16')
   Check ($r.Code -eq 0) '分段 exit=0' "exit=$($r.Code)"
-  Check (Has $r.Out 'SEGMENTS_READY: 16') '分成 16 段'
+  Check ((Has $r.Out 'PLAN: nseg=16') -or (Has $r.Out 'nseg=16')) '分成 16 段'
   Check (Has $r.Out 'partsBytes=123456789') '逐段核对总字节=123456789'
   $f4 = Join-Path $d4 'big.bin'
   Check ((Get-Item $f4).Length -eq 123456789) '拼装后字节=123456789'
@@ -215,8 +215,8 @@ try {
   $r = Invoke-Ghdl @('-Url', "$Base/big.bin", '-OutDir', $d12, '-Parts', '64')
   $tail12 = (($r.Out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 6) -join ' / ')
   Check ($r.Code -eq 0) '-Parts 64 仍能完成 exit=0' "exit=$($r.Code) tail=$tail12"
-  $m = [regex]::Match($r.Out, 'workers=start(\d+)/(\d+)')
-  Check ($m.Success -and [int]$m.Groups[1].Value -le 16 -and [int]$m.Groups[2].Value -le 16) '并发被夹到 ≤16' "workers=$($m.Groups[0].Value)"
+  $m = [regex]::Match($r.Out, 'workers=(\d+)')
+  Check ($m.Success -and [int]$m.Groups[1].Value -le 16) '并发被夹到 ≤16' "workers=$($m.Groups[1].Value)"
   Check ((Get-Item (Join-Path $d12 'big.bin')).Length -eq 123456789) '字节仍精确'
 } finally {
   if ($ownServer) { Stop-Process -Id $ownServer.Id -Force -ErrorAction SilentlyContinue }
