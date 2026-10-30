@@ -294,6 +294,7 @@ metadata:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 # 端口默认自动挑空闲的；要复现/排查时指定：-Port 19000
+# 端口被上一次异常中断留下的 serve.ps1 占着时，会先 SERVER_REAP 清掉再起新的（只清本仓库 tests\serve.ps1）
 # TESTS_OK: 34 项通过
 
 # POSIX runner 的同款离线回归（本地假服务器 + 确定性 SHA256）

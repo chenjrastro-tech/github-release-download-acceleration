@@ -71,6 +71,15 @@ function Get-ExpectedHash([int64]$total) {
 
 # ---- 起本地服务器（端口已被占用就复用，结束时只关自己起的那个）
 $ownServer = $null
+if ($Port -gt 0) {
+  $stale = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains('serve.ps1') -and $_.CommandLine.Contains("-Port $Port") })
+  if ($stale.Count -gt 0) {
+    foreach ($s in $stale) { Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue }
+    "SERVER_REAP: 清掉 $($stale.Count) 个残留 serve.ps1（端口 $Port）"
+    Start-Sleep -Milliseconds 400
+  }
+}
 function Test-Port([int]$p) {
   try { $c = New-Object System.Net.Sockets.TcpClient('127.0.0.1', $p); $c.Close(); $true } catch { $false }
 }
