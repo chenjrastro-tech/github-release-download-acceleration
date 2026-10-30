@@ -28,6 +28,7 @@
 # 仍未实测。Windows 请优先用 ghdl.ps1（WMI 抓孤儿、并行端口探测都更准）。
 
 set -eu
+T_START=$(date +%s)
 
 # 高并发先抬文件句柄上限：macOS 默认 soft limit 只有 256，16 路并发很容易 EMFILE。
 
@@ -310,6 +311,11 @@ else
   fi
 fi
 
+if [ -n "${SHA256_EXPECT:-}" ]; then
+  WANT=$(printf '%s' "$SHA256_EXPECT" | tr 'A-F' 'a-f')
+  echo "want_override=$WANT (SHA256_EXPECT)"
+fi
+
 [ -n "${asset:-}" ] || { echo "BAD_URL: 没解析出资产名" >&2; exit 2; }
 if [ "$DIRECT" = "1" ]; then u="$URL"; else u="https://github.com/$repo/releases/download/$tag/$asset"; fi
 
@@ -378,6 +384,7 @@ win_kbps=$(printf '%s' "$best" | cut -f1)
 win_name=$(printf '%s' "$best" | cut -f2)
 win_url=$(printf '%s' "$best" | cut -f3)
 win_proxy=$(printf '%s' "$best" | cut -f4)
+win_name=$(printf '%s' "$best" | cut -f2)
 win_code=$(printf '%s' "$best" | cut -f5)
 echo "route=$win_name KBps=$win_kbps"
 
@@ -893,6 +900,16 @@ if [ "$SMOKE" = "1" ]; then
   esac
   echo "smoke=$smoke"
 fi
+
+if [ "${SEG_N:-0}" -gt 0 ]; then res_engine=segments; else res_engine=single; fi
+res_parts=${winN:-${PARTS:-1}}
+if [ -n "${WANT:-}" ]; then
+  if [ -n "${got:-}" ]; then res_verified=sha256; else res_verified=size_only; fi
+else
+  res_verified=size_only
+fi
+printf 'RESULT_JSON: {"asset":"%s","bytes":%s,"total":%s,"sha256":"%s","expected":"%s","verified":"%s","engine":"%s","parts":%s,"route":"%s","elapsed_s":%s}\n' \
+  "$asset" "$size" "${TOTAL:-0}" "${got:-}" "$WANT" "$res_verified" "$res_engine" "$res_parts" "${win_name:-}" "$(( $(date +%s) - T_START ))"
 
 echo "saved=$target"
 exit 0

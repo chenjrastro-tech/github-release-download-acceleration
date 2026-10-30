@@ -68,6 +68,7 @@ $head = @"
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -Parts 16          # 手动指定并发段数（诊断/复现用）
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -ForceClean        # 删旧分片/旧输出，强制重下
     powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -KeepParts         # 校验通过也保留分片（排查用）
+    powershell -NoProfile -File scripts\ghdl.ps1 -Url '<...>' -Sha256 '<release 页上的 sha256>'   # API 限流拿不到 digest 时手动给
 
   幂等：目标已存在且字节/SHA256 都对 → 直接 ALREADY_DONE 跳过；中断后重跑 → 按 manifest 沿用分段续传。
   退出码：0=成功；1=流程内失败（看输出里的 CODE: 前缀）；2=参数错误
@@ -80,7 +81,8 @@ param(
   [switch]`$ForceLadder,
   [switch]`$ForceClean,
   [switch]`$KeepParts,
-  [int]`$Parts = 0
+  [int]`$Parts = 0,
+[string]`$Sha256 = ''
 )
 
 `$ErrorActionPreference = 'Stop'

@@ -160,6 +160,7 @@ if ($direct) {
   }
   $api = $code
 }
+if ($Sha256) { $want = ([string]$Sha256).Trim().ToLower(); if ($want) { "want_override=$want（-Sha256/EXPECT_SHA256）" } }
 "asset=$asset total=$total want=$want api=$api assetId=$aid"
 ```
 
@@ -305,6 +306,7 @@ if ($Parts -gt 0) {
 
 ```powershell
 $ErrorActionPreference = 'Stop'
+$swAll = [Diagnostics.Stopwatch]::StartNew()
 $vc = $(if ($curlVer -match '^(\d+)\.(\d+)') { [version]"$($Matches[1]).$($Matches[2])" } else { [version]'0.0' })
 $retry = @('--retry','3','--retry-delay','2')
 if ($vc -ge [version]'7.71') { $retry += '--retry-all-errors' } else { "RETRY_DEGRADED: curl $curlVer < 7.71，只用 --retry 3 --retry-delay 2" }
@@ -534,8 +536,17 @@ if ($verifiedOk -and $asset -match '\.exe$') {
   try { & tar.exe -tf $out | Out-Null; $smoke = 'tar_list_ok' } catch { $smoke = "SMOKE_FAILED: $($_.Exception.Message)" }
 }
 "smoke=$smoke"
-$elapsedSec = $(if ($swE) { [math]::Round($swE.Elapsed.TotalSeconds, 1) } else { 0 })
+$elapsedSec = $(if ($swAll) { [math]::Round($swAll.Elapsed.TotalSeconds, 1) } else { 0 })
 $avgMBs = $(if ($elapsedSec -gt 0) { [math]::Round(($size / 1MB) / $elapsedSec, 2) } else { 0 })
+$resEngine = $(if ($parts -gt 1) { 'segments' } else { 'single' })
+$resParts = [math]::Max(1, [int]$parts)
+$resVerified = $(if (-not $verifiedOk) { 'failed' } elseif ($want) { 'sha256' } else { 'size_only' })
+$resHash = $(if ($got) { $got } else { '' })
+'RESULT_JSON: ' + (@{
+  asset = $asset; bytes = $size; total = $total; sha256 = $resHash; expected = $want
+  verified = $resVerified; engine = $resEngine; parts = $resParts
+  route = $route.Name; elapsed_s = $elapsedSec; avg_mbps = $avgMBs; smoke = $smoke
+} | ConvertTo-Json -Compress)
 ```
 
 ## 块 10 · 10

@@ -126,6 +126,7 @@ powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -ForceLadde
 powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -Parts 16      # 手动指定并发段数
 powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -ForceClean    # 删旧分片/旧输出，强制重下
 powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -KeepParts     # 校验通过也保留分片（排查用）
+powershell -NoProfile -File scripts\ghdl.ps1 -Url '<release 直链>' -Sha256 '<sha256>'   # API 限流/手工下载时指定期望值，仍做闭环校验
 
 # 任意直链也能用（自建 CDN / GitLab / 内网制品库），只做字节数校验
 powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://example.com/big.bin'
@@ -374,6 +375,9 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 ## 变更记录
 
 ### 0.3.5（2026-10-31，未发布）
+
+- **显式 digest（`-Sha256` / `SHA256_EXPECT`）**：GitHub API 匿名 60 次/小时，被限流时拿不到 `digest`，此前只能退化成「只校验字节数」。现在可以把 release 页上的 sha256 直接传进来，两端都会先走完整 SHA256 闭环再报 `DOWNLOAD_VERIFIED_OK`。
+- **机器可读结论 `RESULT_JSON:`**：两个 runner 最后都打一行单行 JSON（`asset/bytes/total/sha256/expected/verified/engine/parts/route/elapsed_s/avg_mbps/smoke`），agent 不用再拿正则去猜自然语言。
 
 macOS/Linux 版 `ghdl.sh` 与 Windows 版对齐到同一套行为，并修掉只在 POSIX/真机路径上暴露的问题：
 
