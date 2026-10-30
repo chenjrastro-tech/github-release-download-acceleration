@@ -43,7 +43,8 @@
     "scripts",
     "tests",
     "assets",
-    "screenshots.json"
+    "screenshots.json",
+    "references"
   ],
   "license": "MIT",
   "author": "Duktig.",

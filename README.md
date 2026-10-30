@@ -135,7 +135,12 @@ powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://example.com/big.bin'
 ```sh
 # macOS / Linux：行为对齐 ps1，仅在 Git Bash 上验过（真机 mac/Linux 未实测，见「支持矩阵」）
 sh scripts/ghdl.sh '<release 直链>'
+sh scripts/ghdl.sh '<release 直链>' -o /tmp/dl -p 16      # 选项与环境变量等价，选项优先
+sh scripts/ghdl.sh --help                                  # 全部选项
 ```
+
+只有 `SKILL.md`、没有 `scripts/`（raw 又被墙）时，用 **最小版**：`SKILL.md` 里「拿不到 scripts/ 时的最小版」一节内联了完整脚本（86 行、只依赖 curl、会分段+续传+校验），
+也单独放在 `scripts/ghdl-min.sh`；`validate.ps1` 会逐字比对两处，改一边不改另一边直接 FAIL。
 
 `scripts/ghdl.ps1` 不是手写的：`scripts/build-runner.ps1` 把 `SKILL.md` 第 0–11 步的代码块拼成它（只替换 URL/输出目录/强制阶梯三处），`validate.ps1` 会比对两者，改了文档不重生成就 FAIL。
 
@@ -333,6 +338,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 # VALIDATE_OK: 0 个错误 / 0 个告警
 ```
 
+GitHub Actions（`.github/workflows/test.yml`）在 push / PR 时自动跑同一套：Windows 侧 `validate.ps1` + `build-runner -Check` + `run-tests.ps1`，
+Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通不等于 CI 也通（首次运行请以 Actions 页面为准）。
+
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
 ## 变更记录
@@ -343,7 +351,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 - SKILL.md 增加「环境分发」「可调参数」「支持矩阵」三节；阈值四处一致性纳入 `validate.ps1`（2c 段）。
 - 修 `-Parts` 语义：现在严格等于「段数」（之前只影响 workers，123MB 资产会退化到 5 段）。
 - 修 worker 池空路线导致的 `Attempted to divide by zero`（`POOL_EMPTY` 明确报错 + `$poolN` 兜底）。
-- **未实测**：macOS/Linux 真机；只在 Windows Git Bash（MINGW64）与 Windows PowerShell 5.1 上跑过。
+- 新增**进度输出**：引擎每 3 秒打一行 `progress=<done>MB/<total>MB (<pct>%) running=<n> rate=<KBps>`，静默超过 10 秒就是引擎没动（`SKILL.md` Verification 有断言）。
+- 新增**单文件自举** `scripts/ghdl-min.sh`（86 行 POSIX sh，无数组/无 `[[ ]]`）：取总长 → ≥32MB 走 8 段并发（不齐自动回落单流）→ 单流 `-C -` 续传 → 字节校验 → 可选 SHA256 三级降级。`SKILL.md` 内联同一份，`validate.ps1` 逐字比对。
+- `scripts/ghdl.sh` 补**与 ps1 对齐的命令行选项**：`-o/--outdir`、`-p/--parts`、`--force-clean`、`--force-ladder`、`--smoke 0|1`、`--keep-tmp`、`--help`；未知选项 `UNKNOWN_FLAG` exit 2（不会静默当 URL）。
+- 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 34 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 11 条 sh 套件（首次真机覆盖）。
+- `SKILL.md` 的「小文件/文本走 contents API」拆到 `references/fetch-raw-via-api.md`（正文只留 3 行指针）：`SKILL.md` 有 64KB 上限，现在 **64,433 B**，`validate.ps1` 会拦超限。
+- `curl --parallel` **评估后不采纳**（理由写在 `SKILL.md` Verification）：本仓引擎已多进程 + 逐段自愈 + 多源混拨，`--parallel -K` 只能整批跑、单段失败无法只重排那一段，收益在噪声内。
+- **未实测**：macOS/Linux 真机（CI 是首次覆盖，本轮未等到 CI 结果）；bsd `nc -z`、`openssl -r`、`unzip -tqq`、`ulimit` 抬不动时的降级路径。
 
 **0.3.0 发布后（main 分支，未发布）**：几项纯性能收尾，仍记在 **0.3.0** 这个大版本下，不单独升版本号；下一次有大内容更新才用 0.3.1。参照物是已发布的 `0.3.0` tag，同机同资产、轮流跑：
 
