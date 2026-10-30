@@ -364,6 +364,9 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 2026-10-30 首次真跑：**Windows / Ubuntu / macOS 三个 job 全部 success**（run 41049031624，commit `dcf333c`）。macOS 那次跑在自带的 bash 3.2 + BSD 工具链上，一次抓出四个只在 BSD/bash 3.2 下才犯的错（`${arr[@]}` 空数组在 `set -u` 下 unbound、`wc -c` 输出前导空格、BSD `sed`/`awk` 处理中文报多字节错、`$VAR` 后面直接跟中文被当成变量名的一部分），全部修完后才绿。
 
+**macOS runner 排队问题（2026-10-30 晚）**：commit `acd6f4f` 的 run 里 `macos-latest` 连续三次 `queued` 约 15 分钟后 `cancelled`、**steps 为空**。GitHub 的 job annotation 写得很清楚：`The job was not acquired by Runner of type hosted even after multiple attempts`，附注 `Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.` ——是 arm64 macOS 池容量不足，与代码无关（同一 run 的 Windows / ubuntu / min-shells 全绿；此前 4 个 commit 的 macOS job 全 success）。处理方式：不改测试、不加 `continue-on-error`，等容量恢复后重跑。本表 macOS 那一行只代表**已经真跑绿过**，不代表每个 commit 都能立刻拿到绿章。
+
+
 发布提交 `d34f82d`（v0.3.1）对应的回归 run 是 **41055438679**，三个 job 同样全部 success。
 
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
