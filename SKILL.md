@@ -803,7 +803,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - **小文件不能用 256KB 当探针门槛**（直链常是小文本，会误判 `NO_ROUTE`）；已知 total 降到 total，未知直链降到 1KB。
 - **报告写实测平均速度，不要写峰值**；收益必须同时给时间降幅与速度升幅，并说明两者不等价。
 - **写技能自己的 .ps1 必须带 BOM**（`UTF8Encoding($true)`）；写回 SKILL.md 相反用 `UTF8Encoding($false)`。`Get-ChildItem -Filter` 只接受单个字符串，多模式用 `Where-Object Name -like`。
-- **SKILL.md 体积有硬上限 65536 字节**：本轮就因超限被拒过一次。改完必须 `(Get-Item SKILL.md).Length` 自检，超了先删重复段落（同一事实只写一次），别删校验步骤。
+- **SKILL.md 体积有硬上限 65536 字节**（宿主会截断超大 SKILL.md）：本轮就因超限被拒过一次。改完必须 `(Get-Item SKILL.md).Length` 自检，超了先删重复段落（同一事实只写一次），别删校验步骤。
 - **续传 manifest 必须先校验 `total` 与 `url`**；`.resume` 合并前要 `Wait-Process` 再 10×300ms 重试（实测直接 `OpenRead` 撞「文件被另一进程占用」）。
 - **收尾清理只删自己建的东西**：别用 `-like 'ghdl_*'` 扫 `%TEMP%`（实测删掉别人的 `%TEMP%\ghdl_tests`，表现为「下载成功但文件不见了」）。
 - **本机假服务器是单线程的**：`tests/serve.ps1` 串行处理连接，探针会全 `000` → `NO_ROUTE`；这是夹具限制。
@@ -812,8 +812,6 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - TODO：宿主已装 aria2c 时可用 `aria2c -x16 -s16 --all-proxy=...` 替代手写分段，未实测，暂不纳入默认流程。
 
 - `curl --parallel`（单进程内并发）**实现过、实测过、又撤了**：P2 阶段 16 段同资产对照 `--parallel` 31.6s vs 多进程自适应 32.3s（噪声内），但 `--parallel -K cfg` 只能整批跑完，单段卡死时无法只杀那一段、换源、续传重排队——等于拿可靠性换 0.7 秒。P3 重写引擎时移除；若要加回，作为可选快路径，不当默认。
-- `SKILL.md` 有 64KB 硬上限（部分宿主把超大 SKILL.md 截断）：新增内容先看 `validate.ps1` 的体积行，逼近上限就把长表拆到 `references/`。
-
 ## Verification
 
 - 自检输出说清路线，并打印 `probeSec`（亚秒级 ~0.4s，非 6s）；已有代理时出现 `KERNEL_SCAN_SKIPPED`、没有全盘扫描阶段。
@@ -832,7 +830,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - **限速节点分支**：只跑 1/16 两档、每档三遍，逐档输出「完成 n/n」、中位与 min–max，最后 `LADDER_DONE: … winN=…`；不出现 4 段档。
 - **P3 断言**：直链走 `direct=True`；重跑命中 `ALREADY_DONE` 或 `RESUME_PLAN`；逐段不符必须 `SEGMENT_SIZE_MISMATCH` + 退出码 1 + `PARTS_KEPT`（且不能打印 `DOWNLOAD_VERIFIED_OK`）。
 - **跨平台分发**：Windows 跑 `scripts/ghdl.ps1`，macOS/Linux 跑 `scripts/ghdl.sh`；两边日志都应有 `skip_ladder`/`SKIP_LADDER` 与同一组阈值（100MB / 3072KB/s）。
-- **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟；Windows 上跑要给 `PYTHON=<真实 python3>`（应用商店的 `python3` 是空壳）。2026-10-30 在 Git Bash 上实测 `TESTS_SH_OK: 18 项通过`。
+- **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟；Windows 上要 `PYTHON=<真实 python3>`（商店版是空壳）。2026-10-30 实测 `TESTS_SH_OK: 23 项通过`，`tests/run-tests-min-shells.sh` 另证 dash/busybox/ksh 跑通 `ghdl-min.sh`。
 - **收尾**：`7897` 不再监听、无本次 `verge-mihomo` 残留、`ProxyEnable` 与开始时一致。
 - **文件体积**：`(Get-Item SKILL.md).Length` ≤ 65536（上限硬约束）。
 
@@ -841,7 +839,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 | 能力 | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | `scripts/ghdl.ps1`（生成物） | 已实测：fzf 1.86MB / OBS 213MB / rclone 31.6MB / Godot 1.2GB，含 `-Parts`、`-ForceClean`、续传、截断、无 Range、404 | 不适用（PowerShell 5.1 专属） | 不适用 |
-| `scripts/ghdl.sh`（手写） | 已实测：Git Bash 上 sh 套件 18 条全过 | 已实测：GitHub Actions `macos-latest`（bash 3.2 + BSD 工具）sh 套件 18 条全过 | 已实测：GitHub Actions `ubuntu-latest` sh 套件 18 条全过 |
+| `scripts/ghdl.sh`（手写） | 已实测：Git Bash 上 sh 套件 23 条全过 | 已实测：GitHub Actions `macos-latest`（bash 3.2 + BSD 工具）sh 套件 23 条全过 | 已实测：GitHub Actions `ubuntu-latest` sh 套件 23 条全过 |
 | 环境探测（端口/代理/内核） | 已实测 | 已实测（CI，`nc` 分支） | 已实测（CI） |
 | 三重校验（字节 + SHA256 + 冒烟） | 已实测 | 部分：字节校验已实测，`openssl`/`shasum` 分支仅 CI 未覆盖 digest | 同上 |
 
