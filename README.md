@@ -363,6 +363,12 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 ## 变更记录
 
+### 0.3.2（2026-10-30）
+- 新增 `.gitattributes`（`*.sh` 固定 LF、图片标 binary）与 `.gitignore`（`_dl_parts/`、`*.part`、编辑器与系统杂物）。此前在 Windows 上 clone 出 CRLF 的 `ghdl.sh` 会报 `bad interpreter`，现在由 git 本身保证行尾。
+- `SKILL.md` 的「其他分发渠道」把 `TODO` 改成明确的覆盖边界：说清本技能**没有**覆盖这些站点的目录结构与校验方式，而不是留一个待办占位。
+- `validate.ps1` 体积检查新增余量提醒：SKILL.md 距 64 KiB 上限不足 2 KB 时打印 `[INFO]`（不计告警），并提示 0–10 步代码块被 `build-runner.ps1` 依赖、新增内容只能进 `references/`。
+- `README.md` 补 v0.3.1 发布提交 `d34f82d` 的实际 CI run `41055438679`，并写全 `--parallel` 不设为默认的理由（16 段 31.6s vs 多进程 32.3s 在噪声内，且 `--parallel -K` 失去单段重排能力）。
+
 ### 0.3.1（2026-10-30）
 - 新增 POSIX runner `scripts/ghdl.sh`（macOS/Linux），行为对齐 ps1：`nc` 探端口、`ulimit -n 4096`、哈希降级链、队列锁 worker 池、单段自愈、逐段强校验、manifest 续传、P2SP 双源混拨、`--connect-timeout 3` + `--speed-limit/--speed-time` 掐死慢段、不支持 Range 秒退单流、按后缀冒烟。
 - 新增 `tests/serve.py` + `tests/run-tests-sh.sh`（8 组 18 断言，离线确定性）；Windows 侧套件已到 37 断言。

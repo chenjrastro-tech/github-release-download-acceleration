@@ -1,6 +1,6 @@
 {
   "name": "github-release-accelerator",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "DSH skill that measures which route to a GitHub release asset is fastest (existing proxy, headless Clash core, public mirrors, direct), runs a time-boxed concurrency ladder on the winner, then downloads in parallel curl ranges and verifies size plus SHA256 against the release digest. No aria2, no system proxy changes, no questions.",
   "keywords": [
     "deepseek-harness",
