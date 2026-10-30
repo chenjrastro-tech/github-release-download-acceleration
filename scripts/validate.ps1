@@ -17,7 +17,7 @@
     5. 5.1 兼容性红线：-Parallel / -ThrottleLimit / 含空格的 -w 参数
     6. agents/openai.yaml：interface 三要素齐备、default_prompt 用 $技能名 引用自己、字符串加引号
     7. 插件包装：package.json / cordis.patch.yml / index.js 三者 id/name 一致
-    8. 一次性 runner（scripts/ghdl.ps1 / ghdl.sh）存在、可解析、且与 SKILL.md 同步
+    8. 一次性 runner（scripts/ghdl.ps1 / ghdl.sh）存在、可解析、与 SKILL.md 同步、镜像清单两端一致
 
   退出码：0 = 全部通过（允许 WARN），1 = 有 FAIL
 #>
@@ -308,6 +308,21 @@ if (Test-Path -LiteralPath $runnerSh) {
   $shText = Read-Utf8 $runnerSh
   if ($shText -notmatch "`r") { Ok "ghdl.sh 是 LF 换行" } else { Bad "ghdl.sh 含 CRLF，POSIX 下会报 bad interpreter" }
   if ($shText -match 'set -[eu]') { Ok "ghdl.sh 设置了 set -e/-u" } else { Warn "ghdl.sh 建议加 set -eu" }
+
+  # 镜像清单必须两端一致：SKILL.md 的 $mirrors 是一路一份，ghdl.sh 的 for m in 是另一路。
+  # 曾经漏掉 hk.gh-proxy.com（文档 7 条、脚本 6 条），只有真机上才发现少测了一条路线。
+  # 注意：正文里有一句 `$mirrors = @()` 的初始化，必须挑「同时含 https://」的那一行才是真正的清单
+  $mirrorLine = (Read-Utf8 $skillPath) -split "`n" | Where-Object { $_ -match '\$mirrors = @\(' -and $_ -match 'https://' } | Select-Object -First 1
+  $shLoop = $shText -split "`n" | Where-Object { $_ -match 'for m in https://' } | Select-Object -First 1
+  if ($mirrorLine -and $shLoop) {
+    $docHosts = [regex]::Matches($mirrorLine, 'https://[A-Za-z0-9.\-]+') | ForEach-Object { $_.Value } | Sort-Object -Unique
+    $shHosts  = [regex]::Matches($shLoop,    'https://[A-Za-z0-9.\-]+') | ForEach-Object { $_.Value } | Sort-Object -Unique
+    $missing  = @($docHosts | Where-Object { $shHosts -notcontains $_ })
+    $extra    = @($shHosts  | Where-Object { $docHosts -notcontains $_ })
+    if ($missing.Count -eq 0 -and $extra.Count -eq 0) { Ok "镜像清单两端一致（$($docHosts.Count) 条）" }
+    elseif ($missing.Count -gt 0) { Bad "ghdl.sh 少了镜像：$($missing -join ', ')（SKILL.md 有、脚本没测）" }
+    else { Bad "ghdl.sh 多了镜像：$($extra -join ', ')（脚本在测、文档没写）" }
+  } else { Warn "找不到镜像清单（SKILL.md 的 `$mirrors 或 ghdl.sh 的 for m in），跳过一致性检查" }
 } else { Warn "没有 scripts/ghdl.sh（macOS/Linux 路径）" }
 
 $testsRunner = Join-Path $SkillRoot 'tests\run-tests.ps1'

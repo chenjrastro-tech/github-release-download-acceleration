@@ -291,7 +291,7 @@ probe() { # $1=name $2=url $3=proxy(可空)
 
 i=0
 if [ "$DIRECT" = "0" ] && [ "$IS_LOCAL" = "0" ]; then
-  for m in https://ghfast.top https://ghproxy.net https://gh-proxy.com https://github.moeyy.xyz https://gh.llkk.cc https://ghproxy.cc; do
+  for m in https://ghfast.top https://ghproxy.net https://gh-proxy.com https://hk.gh-proxy.com https://github.moeyy.xyz https://gh.llkk.cc https://ghproxy.cc; do
     probe "C 镜像 $m" "$m/$u" "" >> "$TMPD/probes" &
     echo $! >> "$PIDS"
   done
