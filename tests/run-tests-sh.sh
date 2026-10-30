@@ -175,6 +175,26 @@ echo "[12] 未知后缀不因冒烟失败"
 OUT=$(run "$WORK/t12" SMOKE=1 -- "$BASE/ok.bin"); RC=$?
 if [ $RC -eq 0 ] && printf '%s' "$OUT" | grep -qE 'smoke=(SKIP|ok)'; then ok "冒烟对 .bin 走 SKIP 不误报"; else bad "后缀冒烟" "rc=$RC"; printf '%s\n' "$OUT" | tail -3; fi
 
+echo "[14] 403（token/权限/限流的脸）→ 非零退出，不落半成品"
+OUT=$(run "$WORK/t14" -- "$BASE/e403.bin"); RC=$?
+if [ $RC -ne 0 ] && [ ! -s "$WORK/t14/e403.bin" ]; then ok "403 干净失败且无残file"; else bad "403 行为" "rc=$RC size=$(wc -c <"$WORK/t14/e403.bin" 2>/dev/null)"; printf '%s\n' "$OUT" | tail -4; fi
+
+echo "[15] 503 两次后恢复 → 重试成功"
+OUT=$(run "$WORK/t15" -- "$BASE/flaky.bin"); RC=$?
+if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t15/flaky.bin" 2>/dev/null | tr -d ' ')" = 1048576 ]; then ok "503 被重试吞掉"; else bad "503 重试" "rc=$RC"; printf '%s\n' "$OUT" | tail -5; fi
+
+echo "[16] 429（Secondary Rate Limit）两次后恢复 → 重试成功"
+OUT=$(run "$WORK/t16" -- "$BASE/flaky429.bin"); RC=$?
+if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t16/flaky429.bin" 2>/dev/null | tr -d ' ')" = 1048576 ]; then ok "429 被重试吞掉"; else bad "429 重试" "rc=$RC"; printf '%s\n' "$OUT" | tail -5; fi
+
+echo "[17] 302 指向 404（CDN 指错路径）→ 非零退出"
+OUT=$(run "$WORK/t17" -- "$BASE/redirect404.bin"); RC=$?
+if [ $RC -ne 0 ] && [ ! -s "$WORK/t17/redirect404.bin" ]; then ok "重定向到 404 干净失败"; else bad "302→404" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; fi
+
+echo "[18] 服务器谎报：声称 2MB，任何 Range 都回 416 → 不许把 0 字节当成功"
+OUT=$(run "$WORK/t18" PARTS=8 -- "$BASE/lies416.bin"); RC=$?
+if [ $RC -ne 0 ] && [ ! -s "$WORK/t18/lies416.bin" ]; then ok "416 谎言被拦住"; else bad "416 谎言" "rc=$RC size=$(wc -c <"$WORK/t18/lies416.bin" 2>/dev/null)"; printf '%s\n' "$OUT" | tail -4; fi
+
 echo "----------------------------------------"
 if [ $FAIL -eq 0 ]; then echo "TESTS_SH_OK: $PASS 项通过"; exit 0; fi
 echo "TESTS_SH_FAILED: $PASS 通过 / $FAIL 失败"; exit 1

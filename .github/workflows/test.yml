@@ -3,7 +3,9 @@
 #   windows job     : scripts/validate.ps1 → scripts/build-runner.ps1 -Check → tests/run-tests.ps1
 #                     （37 条断言，Windows PowerShell 5.1；套件自己用 powershell.exe 起 tests/serve.ps1 假服务器）
 #   macos/linux job : bash -n scripts/ghdl.sh → PYTHON=python3 bash tests/run-tests-sh.sh
-#                     （18 条断言；套件自己用 python3 起 tests/serve.py 假服务器）
+#                     （23 条断言，含 403 / 503 / 429 / 302→404 / 谎报 416 的故障注入）
+#   min-shells job  : 装 dash / busybox / ksh，各跑一遍 scripts/ghdl-min.sh
+#                     （验证「POSIX sh、无数组」这句宣称，不再只有 bash 覆盖）
 #
 # 两个套件都只连 127.0.0.1 上的假服务器，所以这里刻意没有 npm install / pip install 之类的步骤；
 # 唯一的外部网络请求是 actions/checkout 取代码本身。
@@ -112,10 +114,44 @@ jobs:
         shell: bash
         run: bash -n scripts/ghdl.sh
 
-      # 18 条断言：单流 / 8 段 64MB / 续传 / 无 Range / 404 / 截断包 / P2SP 双源 / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟
+      # 23 条断言：单流 / 8 段 64MB / 续传 / 无 Range / 404 / 截断包 / P2SP 双源 / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟
+      # + 故障注入（403 / 503 重试 / 429 重试 / 302→404 / 谎报 416）
       # 套件缺 curl 或 python3 时会打印 SKIP 并 exit 0，所以额外断言 TESTS_SH_OK 真的出现
       - name: 离线回归（run-tests-sh.sh）
         shell: bash
         run: |
           PYTHON=python3 bash tests/run-tests-sh.sh | tee "$RUNNER_TEMP/run-tests-sh.log"
           grep -q 'TESTS_SH_OK:' "$RUNNER_TEMP/run-tests-sh.log"
+
+  # --------------------------------------------------- 非 bash 的 POSIX shell
+  # ghdl-min.sh 对外宣称「POSIX sh、无数组、无 [[ ]]」，但此前只被 bash 跑过。
+  # dash 与 busybox 是两套独立的解析器，正好用来验证这句宣称，而不是继续自我声明。
+  min-shells:
+    name: 自举最小版 / 多 shell 回归（dash / busybox / ksh）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 行尾归一（core.autocrlf=false 后重新落盘）
+        shell: bash
+        run: |
+          git config core.autocrlf false
+          git checkout -- .
+          git ls-files --eol -- scripts/ghdl-min.sh tests/run-tests-min-shells.sh
+
+      - name: 装三个非 bash 的 POSIX shell
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dash busybox-static ksh
+          echo "--- 装到的版本 ---"
+          dash -c 'echo dash ok'
+          busybox sh -c 'echo busybox ok; busybox | head -1'
+          ksh -c 'echo ksh ok'
+
+      - name: 三个 shell 各跑一遍最小版（单流 3MB + 分段 64MB）
+        shell: bash
+        run: |
+          PYTHON=python3 bash tests/run-tests-min-shells.sh dash busybox ksh | tee "$RUNNER_TEMP/min-shells.log"
+          grep -q 'TESTS_MIN_SHELLS_OK:' "$RUNNER_TEMP/min-shells.log"

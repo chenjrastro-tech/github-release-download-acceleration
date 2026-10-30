@@ -203,20 +203,31 @@ api_get() { # $1=url $2=out $3=extra header(可空)
 
 if [ "$DIRECT" = "1" ]; then
   set +u
-  hdr_args=(-sS -L --connect-timeout 5 --max-time 20 -r 0-0 -A 'Mozilla/5.0')
-  if [ -n "$http_proxy_url" ]; then hdr_args+=(--proxy "$http_proxy_url"); else hdr_args+=(--noproxy "*"); fi
+  # 大小探测必须看状态码：以前这里只抓最后一个 Content-Length，503/429/登录页的
+  # 几十字节会被当成「资产总大小」，后面整条链路都按这个错值算，最后报 SIZE_MISMATCH。
+  probe_try=0
+  while [ "$probe_try" -lt 3 ]; do
+    probe_try=$((probe_try + 1))
+    p_args=(-sS -L --connect-timeout 5 --max-time 20 -r 0-0 -A 'Mozilla/5.0' -o /dev/null -w '%{http_code}')
+    if [ -n "$http_proxy_url" ]; then p_args+=(--proxy "$http_proxy_url"); else p_args+=(--noproxy "*"); fi
+    s_code=$(curl "${p_args[@]}" -D "$TMPD/probe.hdr" "$URL" 2>/dev/null || echo 000)
+    case "$s_code" in
+      206|200)
+        cr=$(tr -d '\r' < "$TMPD/probe.hdr" | sed -n 's/^[Cc]ontent-[Rr]ange: *bytes [0-9]*-[0-9]*\/\([0-9][0-9]*\).*/\1/p' | tail -n1)
+        if [ -z "${cr:-}" ] && [ "$s_code" = "200" ]; then
+          cr=$(tr -d '\r' < "$TMPD/probe.hdr" | sed -n 's/^[Cc]ontent-[Ll]ength: *\([0-9][0-9]*\)$/\1/p' | tail -n1)
+        fi
+        break ;;
+      403) echo "HTTP_403: 资产地址拒绝访问（私库/权限/token 失效/限流），不再重试" >&2; break ;;
+      404) echo "HTTP_404: 资产地址不存在（tag 或文件名写错，或被 302 到登录页）" >&2; break ;;
+      408|425|429|500|502|503|504)
+        echo "PROBE_RETRY: code=$s_code，1 秒后重试（第 $probe_try/3 次）" >&2
+        sleep 1 ;;
+      *) echo "PROBE_UNEXPECTED: code=$s_code，按未知大小继续" >&2; break ;;
+    esac
+  done
   set -e
-  h=$(curl "${hdr_args[@]}" -D - -o /dev/null "$URL" 2>/dev/null || true)
-  cr=$(printf '%s' "$h" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Rr]ange: *bytes [0-9]*-[0-9]*\/\([0-9][0-9]*\).*/\1/p' | tail -n1)
-  if [ -z "${cr:-}" ]; then
-    set +u
-    hl_args=(-sSI -L --connect-timeout 5 --max-time 20 -A 'Mozilla/5.0')
-    if [ -n "$http_proxy_url" ]; then hl_args+=(--proxy "$http_proxy_url"); else hl_args+=(--noproxy "*"); fi
-    set -e
-    hl=$(curl "${hl_args[@]}" "$URL" 2>/dev/null | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *\([0-9][0-9]*\)$/\1/p' | tail -n1 || true)
-    [ -n "${hl:-}" ] && [ "$hl" -gt 0 ] && cr=$hl
-  fi
-  [ -n "${cr:-}" ] && TOTAL=$cr
+  [ -n "${cr:-}" ] && [ "$cr" -gt 0 ] && TOTAL=$cr
   echo "asset=$asset total=${TOTAL:-0} api=direct"
 else
   api="https://api.github.com/repos/$repo/releases/tags/$tag"
