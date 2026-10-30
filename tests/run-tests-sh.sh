@@ -96,7 +96,7 @@ for k in range(n):
         f.write(body(s0, s0 + take - 1))
 PY
 OUT=$(run "$WORK/t3" PARTS=8 -- "$BASE/big.bin"); RC=$?
-if [ $RC -eq 0 ] && has "$OUT" "RESUME_PLAN:" && [ "$(wc -c <"$WORK/t3/big.bin" 2>/dev/null)" = 67108864 ]; then ok "沿用 manifest 并补齐"; else bad "续传" "rc=$RC"; printf '%s\n' "$OUT" | tail -5; fi
+if [ $RC -eq 0 ] && has "$OUT" "RESUME_PLAN:" && [ "$(wc -c <"$WORK/t3/big.bin" 2>/dev/null)" = 67108864 ]; then ok "沿用 manifest 并补齐"; else bad "续传" "rc=$RC"; printf '%s\n' "$OUT" | head -6; printf '%s\n' "$OUT" | tail -5; printf "  [dbg] t3 ls=%s wc=%s\n" "$(ls -l $WORK/t3 2>&1 | head -3 | tr '\n' ';')" "$(wc -c <$WORK/t3/big.bin 2>/dev/null)"; fi
 GOT=$(sha256sum "$WORK/t3/big.bin" 2>/dev/null | cut -d' ' -f1)
 [ -z "$GOT" ] && GOT=$(openssl dgst -sha256 -r "$WORK/t3/big.bin" 2>/dev/null | cut -d' ' -f1)
 [ "$GOT" = "$EXP" ] && ok "续传后内容一致" || bad "续传后内容" "got=${GOT:0:12} exp=${EXP:0:12}"
@@ -124,11 +124,11 @@ done
 OUT=$(run "$WORK/t7" PARTS=8 "P2SP_URLS=http://127.0.0.1:$PORT2/big.bin" -- "$BASE/big.bin"); RC=$?
 kill "$SRV2_PID" 2>/dev/null
 if [ $RC -eq 0 ] && has "$OUT" "POOL: 2"; then ok "双源都进池"; else bad "P2SP 双源" "rc=$RC"; printf '%s\n' "$OUT" | grep -E 'POOL|route=' | head -3; fi
-if [ -f "$WORK/t7/big.bin" ] && [ "$(wc -c <"$WORK/t7/big.bin")" = 67108864 ]; then ok "双源拼装字节正确"; else bad "双源拼装字节"; fi
+if [ -f "$WORK/t7/big.bin" ] && [ "$(wc -c <"$WORK/t7/big.bin")" = 67108864 ]; then ok "双源拼装字节正确"; else bad "双源拼装字节"; printf "  [dbg] t7 ls=%s wc=%s\n" "$(ls -l $WORK/t7 2>&1 | head -3 | tr '\n' ';')" "$(wc -c <$WORK/t7/big.bin 2>/dev/null)"; fi
 
 echo "[8] 死 P2SP 源（不可达端口）不影响正经源"
 OUT=$(run "$WORK/t8" PARTS=8 "P2SP_URLS=http://127.0.0.1:1/big.bin" -- "$BASE/big.bin"); RC=$?
-if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t8/big.bin" 2>/dev/null)" = 67108864 ]; then ok "死源被丢弃，仍拼装完整"; else bad "死 P2SP 源" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; fi
+if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t8/big.bin" 2>/dev/null)" = 67108864 ]; then ok "死源被丢弃，仍拼装完整"; else bad "死 P2SP 源" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; printf "  [dbg] t8 ls=%s wc=%s\n" "$(ls -l $WORK/t8 2>&1 | head -3 | tr '\n' ';')" "$(wc -c <$WORK/t8/big.bin 2>/dev/null)"; fi
 
 echo "[9] 坏分片（长度超出应有值）→ 丢弃重下"
 D9="$WORK/t9/big.bin.parts"
@@ -141,7 +141,7 @@ with open(d + "/p001.bin", "wb") as f:      # 第 1 段应为 8,388,608，故意
     f.write(b"\x00" * 9000000)
 PY
 OUT=$(run "$WORK/t9" PARTS=8 -- "$BASE/big.bin"); RC=$?
-if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t9/big.bin" 2>/dev/null)" = 67108864 ]; then ok "坏分片被丢弃重下"; else bad "坏分片处理" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; fi
+if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t9/big.bin" 2>/dev/null)" = 67108864 ]; then ok "坏分片被丢弃重下"; else bad "坏分片处理" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; printf "  [dbg] t9 ls=%s wc=%s\n" "$(ls -l $WORK/t9 2>&1 | head -3 | tr '\n' ';')" "$(wc -c <$WORK/t9/big.bin 2>/dev/null)"; fi
 GOT=$(sha256sum "$WORK/t9/big.bin" 2>/dev/null | cut -d' ' -f1)
 [ -z "$GOT" ] && GOT=$(openssl dgst -sha256 -r "$WORK/t9/big.bin" 2>/dev/null | cut -d' ' -f1)
 [ "$GOT" = "$EXP" ] && ok "坏分片重下后内容一致" || bad "坏分片后内容" "got=${GOT:0:12}"
@@ -154,7 +154,12 @@ if [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && has "$OUT2" "ALREADY_DONE"; then ok "第�
 
 echo "[11] KEEP_TMP=1 保留现场"
 OUT=$(run "$WORK/t11" KEEP_TMP=1 -- "$BASE/ok.bin"); RC=$?
-KEPT=$(printf '%s\n' "$OUT" | awk -F= '/^TMPD_KEPT=/{print $2; exit}')
+KEPT=""
+while IFS= read -r _line; do
+  case $_line in TMPD_KEPT=*) KEPT=${_line#TMPD_KEPT=}; break;; esac
+done <<EOF
+$OUT
+EOF
 if [ $RC -eq 0 ] && [ -n "$KEPT" ] && [ -d "$KEPT" ]; then ok "临时目录被保留（$KEPT）"; rm -rf "$KEPT"; else bad "KEEP_TMP" "rc=$RC kept=$KEPT"; fi
 
 echo "[12] 未知后缀不因冒烟失败"
