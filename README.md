@@ -338,7 +338,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\validate.ps1
 # VALIDATE_OK: 0 个错误 / 0 个告警
 ```
 
-GitHub Actions（`.github/workflows/test.yml`）在 push / PR 时自动跑同一套：Windows 侧 `validate.ps1` + `build-runner -Check` + `run-tests.ps1`，
+GitHub Actions（`.github/workflows/test.yml`，尚未并入 main，见变更记录）在 push / PR 时自动跑同一套：Windows 侧 `validate.ps1` + `build-runner -Check` + `run-tests.ps1`，
 Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通不等于 CI 也通（首次运行请以 Actions 页面为准）。
 
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
@@ -354,7 +354,8 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通
 - 新增**进度输出**：引擎每 3 秒打一行 `progress=<done>MB/<total>MB (<pct>%) running=<n> rate=<KBps>`，静默超过 10 秒就是引擎没动（`SKILL.md` Verification 有断言）。
 - 新增**单文件自举** `scripts/ghdl-min.sh`（86 行 POSIX sh，无数组/无 `[[ ]]`）：取总长 → ≥32MB 走 8 段并发（不齐自动回落单流）→ 单流 `-C -` 续传 → 字节校验 → 可选 SHA256 三级降级。`SKILL.md` 内联同一份，`validate.ps1` 逐字比对。
 - `scripts/ghdl.sh` 补**与 ps1 对齐的命令行选项**：`-o/--outdir`、`-p/--parts`、`--force-clean`、`--force-ladder`、`--smoke 0|1`、`--keep-tmp`、`--help`；未知选项 `UNKNOWN_FLAG` exit 2（不会静默当 URL）。
-- 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 34 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 11 条 sh 套件（首次真机覆盖）。
+- 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 34 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 11 条 sh 套件。
+  **注意**：这份工作流当前在本地分支 `ci-workflow`，还没进 `main`——`gh` 的 token 只有 `repo`/`gist`/`read:org`，GitHub 拒绝「无 `workflow` scope 的 OAuth 应用创建/更新工作流」。要启用它：`gh auth refresh -s workflow` 后推送该分支（或网页上传）。
 - `SKILL.md` 的「小文件/文本走 contents API」拆到 `references/fetch-raw-via-api.md`（正文只留 3 行指针）：`SKILL.md` 有 64KB 上限，现在 **64,433 B**，`validate.ps1` 会拦超限。
 - `curl --parallel` **评估后不采纳**（理由写在 `SKILL.md` Verification）：本仓引擎已多进程 + 逐段自愈 + 多源混拨，`--parallel -K` 只能整批跑、单段失败无法只重排那一段，收益在噪声内。
 - **未实测**：macOS/Linux 真机（CI 是首次覆盖，本轮未等到 CI 结果）；bsd `nc -z`、`openssl -r`、`unzip -tqq`、`ulimit` 抬不动时的降级路径。

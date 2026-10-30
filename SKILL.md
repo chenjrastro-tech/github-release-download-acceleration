@@ -47,6 +47,20 @@ macOS runner 的参数全部走环境变量：
 | `SMOKE` | 1 | 0=关掉后缀冒烟 |
 | `KEEP_TMP` | 0 | 1=保留临时目录（排障） |
 
+sh 侧同时接受与 ps1 对齐的命令行选项（优先于同名环境变量），用法 `bash ghdl.sh <url> [选项]`：
+
+| 选项 | 等价的 ps1 参数 | 说明 |
+| --- | --- | --- |
+| `-o, --outdir DIR` | `-OutDir` | 落盘目录 |
+| `-p, --parts N` | `-Parts` | 强制定段数 |
+| `--force-clean` | `-ForceClean` | 清旧分片与半成品 |
+| `--force-ladder` | `-ForceLadder` | 强制测 1 段 vs 16 段 |
+| `--smoke 0\|1` | — | 关/开后缀冒烟 |
+| `--keep-tmp` | `-KeepParts` | 保留下载现场 |
+| `-h, --help` | — | 打印用法 |
+
+未知选项报 `UNKNOWN_FLAG` 并 exit 2（不会静默当 URL 用）。
+
 macOS 侧实现要点（`scripts/ghdl.sh` 顶部注释同步维护）：
 
 - 端口探测用 `nc -z -w 1 127.0.0.1 <port>`，没有 `nc` 回退 `curl --connect-timeout 1`；不用 `/dev/tcp`（dash/老 bash 下不可用）。
@@ -57,6 +71,89 @@ macOS 侧实现要点（`scripts/ghdl.sh` 顶部注释同步维护）：
 - `--http2` / `--buffer-size` / `--proxy-http2` 全部先用 `curl --help all` 探测再用（Git Bash 自带的 curl 8.22 既没有 `--buffer-size` 也没编 HTTP/2，硬写参数会直接 exit 2）。
 - 服务器忽略 Range（`code=200`）时立刻 `RANGE_UNSUPPORTED` 降级单流，不死磕分段。
 - 冒烟按后缀分派：`.zip` → `unzip -tqq`、`.tar.gz/.tgz/.tar` → `tar -tf`、`.exe` 在 macOS 上一律 `smoke=SKIP`（不能执行 Windows 二进制，完整性靠 SHA256）。
+
+## 拿不到 scripts/ 时的最小版（可整段复制）
+
+只有 SKILL.md、且 `raw.githubusercontent` 被墙时用它：只依赖 `curl`，不做选路和多源，
+但会分段、续传、强校验。正式场景仍用 `scripts/ghdl.sh`（选路 + 自愈 + digest 闭环）。
+
+```sh
+#!/bin/sh
+# ghdl-min.sh —— 最小下载器（单文件，可整段复制）。用法: sh ghdl-min.sh <url> [outdir]
+# 环境变量: SHA256=<hex>  PROXY=http://127.0.0.1:7897；只依赖 curl，哈希三级降级。
+set -u
+url=${1:-}; [ -n "$url" ] || { echo "MIN_USAGE: sh ghdl-min.sh <url> [outdir]"; exit 2; }
+out=${2:-"$HOME/Downloads"}
+mkdir -p "$out" 2>/dev/null || { echo "MIN_NO_OUTDIR: $out"; exit 2; }
+name=${url##*/}; name=${name%%\?*}
+[ -n "$name" ] || { echo "MIN_BAD_URL: $url"; exit 2; }
+dst=$out/$name
+proxy=${PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}
+fetch() {  # 有代理就带上，没有就不带（不用数组，POSIX sh 没有）
+  if [ -n "$proxy" ]; then
+    curl -sS -L --connect-timeout 10 --retry 2 -A 'Mozilla/5.0' --proxy "$proxy" "$@"
+  else
+    curl -sS -L --connect-timeout 10 --retry 2 -A 'Mozilla/5.0' "$@"
+  fi
+}
+# 总长：先 1 字节 Range 的 Content-Range，再退回 HEAD 的 Content-Length
+total=$(fetch -r 0-0 -D - -o /dev/null "$url" 2>/dev/null | tr -d '\r' \
+  | awk 'tolower($0) ~ /^content-range:/ { split($0,a,"/"); print a[2]; exit }')
+[ -n "${total:-}" ] || total=$(fetch -sSI -o /dev/null -D - "$url" 2>/dev/null | tr -d '\r' \
+  | awk 'tolower($0) ~ /^content-length:/ { print $2; exit }')
+case ${total:-} in ''|*[!0-9]*) total=0 ;; esac
+echo "MIN_TOTAL=$total"
+
+if [ "$total" -ge 33554432 ]; then  # >=32MB 才分段，小文件单流更稳
+  echo "MIN_SEG=8"
+  tmpd=$out/.ghdl_min_$$; rm -rf "$tmpd"; mkdir -p "$tmpd"
+  chunk=$(( (total + 7) / 8 )); i=0
+  while [ $i -lt 8 ]; do
+    s=$((i * chunk)); e=$((s + chunk - 1)); [ $e -ge "$total" ] && e=$((total - 1))
+    [ $s -le $e ] && fetch -r "$s-$e" -o "$tmpd/p$i.bin" "$url" &
+    i=$((i + 1))
+  done
+  wait
+  i=0; sum=0; bad=0
+  while [ $i -lt 8 ]; do
+    s=$((i * chunk)); e=$((s + chunk - 1)); [ $e -ge "$total" ] && e=$((total - 1))
+    need=$((e - s + 1)); have=$(wc -c < "$tmpd/p$i.bin" 2>/dev/null || echo 0)
+    [ "$have" -eq "$need" ] || bad=1
+    sum=$((sum + have)); i=$((i + 1))
+  done
+  if [ "$bad" -eq 0 ] && [ "$sum" -eq "$total" ]; then
+    : > "$dst"; i=0
+    while [ $i -lt 8 ]; do cat "$tmpd/p$i.bin" >> "$dst"; i=$((i + 1)); done
+    rm -rf "$tmpd"; echo "MIN_SEG_OK"
+  else
+    echo "MIN_SEG_FALLBACK: 分片不齐（$sum/$total），改单流重下"; rm -rf "$tmpd"
+  fi
+fi
+
+if [ ! -s "$dst" ]; then
+  echo "MIN_SINGLE"
+  fetch -C - -o "$dst.part" "$url"; rc=$?
+  got=$(wc -c < "$dst.part" 2>/dev/null || echo 0)
+  if [ "$total" -gt 0 ] && [ "$got" -ne "$total" ]; then
+    echo "MIN_SIZE_MISMATCH: got=$got want=$total (curl rc=$rc)（半截文件保留在 $dst.part）"; exit 1
+  fi
+  [ "$rc" -ne 0 ] && { echo "MIN_FAILED: curl rc=$rc"; exit 1; }
+  mv -f "$dst.part" "$dst"
+fi
+
+got=$(wc -c < "$dst" 2>/dev/null || echo 0)
+[ "$total" -gt 0 ] && [ "$got" -ne "$total" ] && { echo "MIN_SIZE_MISMATCH: got=$got want=$total"; exit 1; }
+if [ -n "${SHA256:-}" ]; then
+  if command -v openssl >/dev/null 2>&1; then h=$(openssl dgst -sha256 "$dst" | awk '{print $NF}')
+  elif command -v shasum >/dev/null 2>&1; then h=$(shasum -a 256 "$dst" | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then h=$(sha256sum "$dst" | awk '{print $1}')
+  else h=""; echo "MIN_SHA_SKIP: 没有可用的 sha256 工具"; fi
+  [ -n "$h" ] && [ "$h" != "$SHA256" ] && { echo "MIN_SHA_MISMATCH: got=$h want=$SHA256"; exit 1; }
+fi
+echo "MIN_OK: $dst ($got 字节)"
+```
+
+用法：`sh ghdl-min.sh '<url>' [outdir]`；可选 `SHA256=<hex>`、`PROXY=http://127.0.0.1:7897`。
 
 ## 环境自适应决策表
 
@@ -498,6 +595,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
     if ($have -lt ($e - $s + 1)) { [void]$queue.Add([pscustomobject]@{ Index = $i; Start = $s; End = $e; Route = ($i % $poolN); Tries = 0 }) }
   }
   $running = @{}; $jid = 0; $swE = [Diagnostics.Stopwatch]::StartNew()
+  $tick = 0; $lastDone = [int64]0; $lastT = 0.0
   while ($queue.Count -gt 0 -or $running.Count -gt 0) {
     while ($running.Count -lt $workers -and $queue.Count -gt 0) {
       $seg = $queue[0]; $queue.RemoveAt(0); $jid++
@@ -515,6 +613,15 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
       $running[$jid] = [pscustomobject]@{ Seg = $seg; File = $f; Resume = $(if ($tgt -eq $f) { $null } else { $tgt }); Proc = $pr; Last = $have; Still = 0 }
     }
     Start-Sleep -Milliseconds 500
+    $tick++
+    if ($tick % 6 -eq 0) {
+      $done = [int64]0
+      Get-ChildItem $dir -Filter 'p*.bin' -ErrorAction SilentlyContinue | ForEach-Object { $done += $_.Length }
+      $now = $swE.Elapsed.TotalSeconds; $kbps = 0
+      if ($now -gt $lastT) { $kbps = [math]::Round((($done - $lastDone) / 1024) / ($now - $lastT)) }
+      $lastDone = $done; $lastT = $now
+      "progress=$([math]::Round($done/1MB,1))MB/$([math]::Round($total/1MB,1))MB ($([math]::Round(100.0*$done/$total))%) running=$($running.Count) rate=${kbps}KB/s"
+    }
     foreach ($k in @($running.Keys)) {
       $job = $running[$k]; $stalled = $false
       if (-not $job.Proc.HasExited) {
@@ -650,23 +757,8 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 
 ### 小文件/文本走同一条代理通道（web_fetch 被墙时）
 
-`raw.githubusercontent.com` 实测 `curl: (35) Recv failure: Connection was reset`、落盘 0 字节，**同一 URL 重试无效**。改走 contents API：
-
-```powershell
-$repo = 'Tencent/BrowserSkill'; $path = 'README.md'; $ref = 'main'
-$rawOut = Join-Path $env:TEMP ("raw_{0}.md" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-$hdrRaw = @('-H','User-Agent: dsh-agent','-H','Accept: application/vnd.github.raw')
-$ua = $(if ($winProxy) { @('--proxy',$winProxy) } else { @() })
-$code = (& $curlExe -sS -m 40 @ua @hdrRaw -o $rawOut -w '%{http_code}' "https://api.github.com/repos/$repo/contents/$path?ref=$ref" 2> "$rawOut.err")
-$bytes = $(if (Test-Path $rawOut) { (Get-Item $rawOut).Length } else { 0 })
-"contents api=$code bytes=$bytes"
-if ($bytes -eq 0) { throw "RAW_UNVERIFIED: contents API 返回 $code 且 0 字节（$((Get-Content "$rawOut.err" -Raw -ErrorAction SilentlyContinue).Trim())）" }
-$txt = Get-Content $rawOut -Raw -Encoding UTF8
-if ($txt.Length -gt 0) { $txt.Substring(0, [math]::Min(1200, $txt.Length)) }
-Remove-Item $rawOut,"$rawOut.err" -Force -ErrorAction SilentlyContinue
-```
-
-实测：`bytes: 35598`（README）、`bytes: 8094`（AGENT_INSTALL.md）。收尾照样走第 10 步。
+`raw.githubusercontent.com` 被墙时别重试同一 URL，改走 contents API（`Accept: application/vnd.github.raw`）。
+可直接复制的命令与实测字节数见 `references/fetch-raw-via-api.md`。
 
 ### 其他分发渠道（不是 GitHub Release 时）
 
@@ -714,12 +806,16 @@ Remove-Item $rawOut,"$rawOut.err" -Force -ErrorAction SilentlyContinue
 - **版本对比先取证再下结论**：`git tag --list` 核实真实 tag（本项目是 `v0.1.0` / `v0.2.0` / `v0.2.1`，**没有** 1.0），再 `git diff --stat <base>..HEAD` 给文件数与增删行数；不许自设「里程碑」当基准，也不许用分条清单代替按维度标新增/重写/沿用的对比表。
 - TODO：宿主已装 aria2c 时可用 `aria2c -x16 -s16 --all-proxy=...` 替代手写分段，未实测，暂不纳入默认流程。
 
+- `curl --parallel`（单进程内并发）评估后**不采纳**：本仓 ps1/sh 引擎已经是「多进程 + 逐段自愈 + 多源混拨」，`--parallel -K cfg` 只能整批跑完、单段失败无法只重排队那一段；在本机同资产对照里并发的收益来自「连接数」而不是「进程数」，换成一进程反而丢掉按段换源（实测差距在噪声内，未采纳）。
+- `SKILL.md` 有 64KB 硬上限（部分宿主把超大 SKILL.md 截断）：新增内容先看 `validate.ps1` 的体积行，逼近上限就把长表拆到 `references/`。
+
 ## Verification
 
 - 自检输出说清路线，并打印 `probeSec`（亚秒级 ~0.4s，非 6s）；已有代理时出现 `KERNEL_SCAN_SKIPPED`、没有全盘扫描阶段。
 - **选路证据**：探针表逐条打印 `code/bytes/KBps`，被拒绝的路线（`000`、中途 `(28)`）也在表里；`route=… KBps=…` 与最终 `pool=` 一致，说明没有盲试同一域名。
 - **API 替代取法的证明**：日志有 `api=200` + `bytes=<非零>`，且无 `Invoke-RestMethod` 报错行；403 是 `API_RATE_LIMITED` + GITHUB_TOKEN 提示，被墙是 `ASSET_UNVERIFIED` + `range_probe` 反推 total。
 - 第 3 步打印 `asset=… total=… want=… assetId=…`；资产名对不上必须输出 `ASSET_NOT_FOUND`、全部候选（名字+MB）与最接近一条，且没生成下载文件、没进第 4 步探测。
+- **进度证据**：>100MB 资产下载途中每 3 秒应有 `progress=<已下>MB/<总>MB (<pct>%) running=<n> rate=<KBps>`，静默超过 10 秒说明引擎没在动（或已卡死）。
 - **分片证据**：`PLAN: nseg=… chunk=…MB workers=…`（chunk 落在 2–24MB、nseg ≤ 128），随后 `engine_done=segments nseg=… stalls=… repairs=…`；出现 0 字节段时日志必须是 `repairs ≥ 1` 且只补该段，不是从头重下。
 - **完整性三重证据**：`partsBytes=<sum> total=<total> ok=True` → `size=<size> sizeOk=True` → `sha256=<64 位十六进制>` 与 `digest=sha256:…` 一致 → `DOWNLOAD_VERIFIED_OK`；无 digest 时 `DOWNLOAD_SIZE_OK_NO_DIGEST`。
 - **冒烟证据**：exe 打印 `smoke=31.8.0`（或实际版本号）；zip 打印 `smoke=unzip_ok files=N`。只打印路径不算通过。

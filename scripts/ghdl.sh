@@ -30,15 +30,46 @@
 set -eu
 
 # 高并发先抬文件句柄上限：macOS 默认 soft limit 只有 256，16 路并发很容易 EMFILE。
+
+usage() {
+  cat >&2 <<'USAGE'
+用法: bash ghdl.sh <github release url | https 直链> [选项]
+  -o, --outdir DIR     下载目录（默认 ~/Downloads，等价 OUTDIR）
+  -p, --parts N        指定并发段数（默认 0 = 按单连接速度自适应，等价 PARTS）
+      --force-clean    清掉上次的分片与半截文件重下（等价 FORCE_CLEAN=1）
+      --force-ladder   跳过「单连接够快就单流」的判断，强制测阶梯（等价 FORCE_LADDER=1）
+      --smoke 0|1      下完是否做冒烟（默认 1，等价 SMOKE）
+      --keep-tmp       留着临时目录排错（等价 KEEP_TMP=1）
+  -h, --help           显示本帮助
+环境变量与选项等价：OUTDIR PARTS FORCE_CLEAN FORCE_LADDER SMOKE KEEP_TMP
+                 LADDER_MIN_MB FAST_KBPS MIN_KBPS WORKERS P2SP_URLS PROXY
+USAGE
+}
+
+_url=""
+KEEP_TMP=${KEEP_TMP:-0}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--outdir) [ $# -ge 2 ] || { echo "MISSING_VALUE: $1" >&2; exit 2; }; OUTDIR=$2; shift 2 ;;
+    --outdir=*) OUTDIR=${1#*=}; shift ;;
+    -p|--parts) [ $# -ge 2 ] || { echo "MISSING_VALUE: $1" >&2; exit 2; }; PARTS=$2; shift 2 ;;
+    --parts=*) PARTS=${1#*=}; shift ;;
+    --force-clean) FORCE_CLEAN=1; shift ;;
+    --force-ladder) FORCE_LADDER=1; shift ;;
+    --smoke) [ $# -ge 2 ] || { echo "MISSING_VALUE: $1" >&2; exit 2; }; SMOKE=$2; shift 2 ;;
+    --smoke=*) SMOKE=${1#*=}; shift ;;
+    --keep-tmp) KEEP_TMP=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "UNKNOWN_FLAG: $1（--help 看用法）" >&2; exit 2 ;;
+    *) if [ -z "$_url" ]; then _url=$1; else echo "EXTRA_ARG: $1" >&2; exit 2; fi; shift ;;
+  esac
+done
+URL=${_url:-}
+[ -n "$URL" ] || { usage; exit 2; }
 ulimit -n 4096 2>/dev/null || echo "ULIMIT_SKIP: 当前环境不允许把 nofile 抬到 4096（继续，但并发高时可能 EMFILE）"
 
-URL=${1:-}
-if [ -z "$URL" ]; then
-  echo "用法: bash $0 <github release url | https 直链>" >&2
-  exit 2
-fi
-
 OUTDIR=${OUTDIR:-$HOME/Downloads}
+PARTS=${PARTS:-0}
 WORKERS=${WORKERS:-16}
 PARTS_OVERRIDE=${PARTS:-0}
 FORCE_LADDER=${FORCE_LADDER:-0}

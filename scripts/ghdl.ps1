@@ -380,6 +380,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
     if ($have -lt ($e - $s + 1)) { [void]$queue.Add([pscustomobject]@{ Index = $i; Start = $s; End = $e; Route = ($i % $poolN); Tries = 0 }) }
   }
   $running = @{}; $jid = 0; $swE = [Diagnostics.Stopwatch]::StartNew()
+  $tick = 0; $lastDone = [int64]0; $lastT = 0.0
   while ($queue.Count -gt 0 -or $running.Count -gt 0) {
     while ($running.Count -lt $workers -and $queue.Count -gt 0) {
       $seg = $queue[0]; $queue.RemoveAt(0); $jid++
@@ -397,6 +398,15 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
       $running[$jid] = [pscustomobject]@{ Seg = $seg; File = $f; Resume = $(if ($tgt -eq $f) { $null } else { $tgt }); Proc = $pr; Last = $have; Still = 0 }
     }
     Start-Sleep -Milliseconds 500
+    $tick++
+    if ($tick % 6 -eq 0) {
+      $done = [int64]0
+      Get-ChildItem $dir -Filter 'p*.bin' -ErrorAction SilentlyContinue | ForEach-Object { $done += $_.Length }
+      $now = $swE.Elapsed.TotalSeconds; $kbps = 0
+      if ($now -gt $lastT) { $kbps = [math]::Round((($done - $lastDone) / 1024) / ($now - $lastT)) }
+      $lastDone = $done; $lastT = $now
+      "progress=$([math]::Round($done/1MB,1))MB/$([math]::Round($total/1MB,1))MB ($([math]::Round(100.0*$done/$total))%) running=$($running.Count) rate=${kbps}KB/s"
+    }
     foreach ($k in @($running.Keys)) {
       $job = $running[$k]; $stalled = $false
       if (-not $job.Proc.HasExited) {

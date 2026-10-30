@@ -319,6 +319,36 @@ if ((Test-Path -LiteralPath $testsRunner) -and (Test-Path -LiteralPath $testsSer
   if ($tErr -and $tErr.Count -gt 0) { Bad "tests\run-tests.ps1 语法错误 $($tErr.Count) 处" } else { Ok "tests\run-tests.ps1 语法解析通过" }
 } else { Warn "没有 tests\run-tests.ps1（离线回归测试缺失）" }
 
+# ---------- 9. 最小版自举 + 文档体积 + CI ----------
+$skillText = Read-Utf8 $skillPath
+$skillBytes = [Text.Encoding]::UTF8.GetByteCount($skillText)
+if ($skillBytes -le 65536) { Ok "SKILL.md 体积 $skillBytes 字节（<= 64KB 上限）" }
+else { Bad "SKILL.md 已 $skillBytes 字节，超过 64KB 上限（拆到 references/）" }
+
+$miniSh = Join-Path $SkillRoot 'scripts\ghdl-min.sh'
+if (-not (Test-Path -LiteralPath $miniSh)) {
+  Bad "缺少 scripts/ghdl-min.sh（单文件自举用的最小下载器）"
+} else {
+  $miniText = Read-Utf8 $miniSh
+  if ($miniText -match "`r") { Bad "ghdl-min.sh 含 CRLF，POSIX 下会报 bad interpreter" } else { Ok "ghdl-min.sh 是 LF 换行" }
+  if ($miniText -notmatch '^#!/bin/sh') { Bad "ghdl-min.sh 缺少 #!/bin/sh" } else { Ok "ghdl-min.sh 解释器声明正确" }
+  # SKILL.md 里的内联块必须与文件逐字一致，否则用户复制到的是过期版本
+  $m = [regex]::Match($skillText, '(?ms)拿不到 scripts/ 时的最小版.*?```sh\r?\n(?<code>.*?)\r?\n```')
+  if (-not $m.Success) { Bad "SKILL.md 缺少「最小版」章节或其 sh 代码块" }
+  else {
+    $inline = $m.Groups['code'].Value.Replace("`r`n", "`n").TrimEnd()
+    $file = $miniText.Replace("`r`n", "`n").TrimEnd()
+    if ($inline -eq $file) { Ok "SKILL.md 内联的最小版与 scripts/ghdl-min.sh 逐字一致" }
+    else { Bad "SKILL.md 内联的最小版与 scripts/ghdl-min.sh 不一致（改一边要同步另一边）" }
+  }
+}
+
+$ciPath = Join-Path $SkillRoot '.github\workflows\test.yml'
+if (Test-Path -LiteralPath $ciPath) {
+  $ci = Read-Utf8 $ciPath
+  if ($ci -match '(?m)^\s*matrix:') { Ok "CI 工作流含 matrix" } else { Warn "CI 工作流没有 matrix" }
+} else { Warn "没有 .github/workflows/test.yml（三平台 CI 未落地）" }
+
 Write-Host ("-" * 72)
 if ($script:fail -gt 0) {
   Write-Host "VALIDATE_FAILED: $($script:fail) 个错误 / $($script:warn) 个告警" -ForegroundColor Red
