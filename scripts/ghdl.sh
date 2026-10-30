@@ -326,20 +326,32 @@ win_proxy=$(printf '%s' "$best" | cut -f4)
 win_code=$(printf '%s' "$best" | cut -f5)
 echo "route=$win_name KBps=$win_kbps"
 
-# P2SP 路线池：最多 2 条（代理 + 镜像各一），要求拿到 ≥1MB 且速度不低于最快的 35%。
-# 目的不是「更多连接」，而是突破单节点每连接限速/单 IP 限速。
+# P2SP 路线池：2 个槽位。槽1 = 当前最快路线；槽2 = 用户显式给的备源（M）里最快的一条，
+# 没有备源才用「探针 ≥1MB 且速度 ≥ 最快 35%」的其它自动发现路由。
+# 不用相对门槛淘汰显式备源：本机/同机房的 1MB 探针 speed 噪声极大（同一对源 47MB/s 与 414MB/s 交替出现），
+# 门槛会把活着的备源误杀；自动发现的公共镜像/代理仍按门槛淘汰。
 POOL_N=0; POOL_URL1=""; POOL_PX1=""; POOL_URL2=""; POOL_PX2=""
 pool_tab="$TMPD/pool"
-awk -F'|' -v minb="$minb" -v best="$win_kbps" '{
+awk -F'|' -v minb="$minb" -v best="$win_kbps" -v win="$win_url" '{
     code=$2; bytes=$3+0; spd=$4+0; kb=int(spd/1024);
-    if ((code=="200"||code=="206") && bytes>=minb && kb >= best*35/100) printf "%d\t%s\t%s\n", kb, $5, $6;
-  }' "$TMPD/probes" | sort -rn | head -n2 > "$pool_tab"
-while IFS="$(printf '\t')" read -r kb pu ppx; do
+    if (!((code=="200"||code=="206") && bytes>=minb)) next;
+    explicit = ($1 ~ /^M /) ? 1 : 0;
+    if ($5 == win && !winseen) { print kb "\t" $5 "\t" $6 "\t" 2 "\t" 1; winseen=1; next }
+    if (explicit) { print kb "\t" $5 "\t" $6 "\t" 1 "\t" 0; next }
+    if (kb >= best*35/100) print kb "\t" $5 "\t" $6 "\t" 0 "\t" 0;
+  }' "$TMPD/probes" | sort -t"$(printf '\t')" -k1,1rn > "$pool_tab"
+# 取：槽1 优先「最快的显式备源」，否则最快的一条；槽2 取剩下里最快的（win 也算候选）
+pick=$(awk -F'\t' '{print $2 "\t" $3}' "$pool_tab" | awk '!seen[$0]++' | head -n2)
+n=0
+while IFS="$(printf '\t')" read -r pu ppx; do
   [ -n "${pu:-}" ] || continue
-  POOL_N=$((POOL_N + 1))
-  if [ "$POOL_N" = 1 ]; then POOL_URL1=$pu; POOL_PX1=$ppx; fi
-  if [ "$POOL_N" = 2 ]; then POOL_URL2=$pu; POOL_PX2=$ppx; fi
-done < "$pool_tab"
+  n=$((n + 1))
+  if [ "$n" = 1 ]; then POOL_URL1=$pu; POOL_PX1=$ppx; fi
+  if [ "$n" = 2 ]; then POOL_URL2=$pu; POOL_PX2=$ppx; fi
+done <<EOF
+$pick
+EOF
+POOL_N=$n
 [ "$POOL_N" -ge 1 ] || { POOL_N=1; POOL_URL1=$win_url; POOL_PX1=$win_proxy; }
 echo "POOL: $POOL_N 条路线（$([ "$POOL_N" -ge 2 ] && echo '混拨 proxy+mirror' || echo '单源')）"
 
