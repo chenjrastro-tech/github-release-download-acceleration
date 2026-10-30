@@ -357,6 +357,8 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 2026-10-30 首次真跑：**Windows / Ubuntu / macOS 三个 job 全部 success**（run 41049031624，commit `dcf333c`）。macOS 那次跑在自带的 bash 3.2 + BSD 工具链上，一次抓出四个只在 BSD/bash 3.2 下才犯的错（`${arr[@]}` 空数组在 `set -u` 下 unbound、`wc -c` 输出前导空格、BSD `sed`/`awk` 处理中文报多字节错、`$VAR` 后面直接跟中文被当成变量名的一部分），全部修完后才绿。
 
+发布提交 `d34f82d`（v0.3.1）对应的回归 run 是 **41055438679**，三个 job 同样全部 success。
+
 `validate.ps1` 检查：必需文件、frontmatter（`name` 与目录名一致、`description` 长度、未知键告警）、**`metadata` 里的两个阈值与正文 `$ladderMinMB`/`$fastKB` 是否一致**、`## Steps` / `## Pitfalls` / `## Verification` 三节、每个 `powershell` 代码块的 5.1 语法、禁用写法（`(if …)` 括号陷阱与 `& curl … 2>&1` 记为**错误**，`+= 管道` 记为**告警**）、以及 `agents/openai.yaml` 的字段长度与 `$skill` 引用。**退出码非 0 就是文档有问题。**
 
 ## 变更记录
@@ -422,6 +424,8 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 - 并发不是越多越快：限速节点上 16 段最优、24/32 段回落；不限速节点上单流反而更快。最优值随节点漂移，所以每轮现场测。
 - **<100 MB 或单连接已 ≥3 MB/s 时不测量并发**（直接单流），因为阶梯要 20–26 秒、还可能顺带下载上百 MB 采样流量；想强制测就置 `$ForceLadder = $true`；想改门槛就改正文「可调参数」表与代码里的 `$ladderMinMB` / `$fastKB`（`validate.ps1` 会拦两处不一致）。
 - 镜像可用性完全取决于当时网络，全灭（全 `000`）是正常结果，此时只能退回直连多段。
+- **`SKILL.md` 余量很小**：第 0–10 步的 `powershell` 代码块是 `build-runner.ps1` 生成 `scripts/ghdl.ps1` 的唯一真源，**不能拆到 `references/`**；而 `validate.ps1` 又卡 64 KiB 上限。所以新增内容一律先放 `references/`，正文只加一行索引；余量不足 2 KB 时 `validate.ps1` 会打 `[INFO]` 提醒（不计告警，但别忽视）。
+- **`--parallel` 不是默认路径，是有意的**：单进程 `--parallel` 跑 16 段实测 31.6s，同资产多进程自适应 32.3s，差值在噪声内；但 `--parallel -K` 只能整批跑完，某段卡死时没法只杀那一段再换源重排队。这套引擎的卖点是「卡住能自愈」，所以宁可用 0.7 秒换可靠性。
 
 ## 许可证
 

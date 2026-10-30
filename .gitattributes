@@ -1,0 +1,9 @@
+# 换行归一：POSIX runner 与最小版必须是 LF，否则 macOS/Linux 上报 bad interpreter。
+# （Windows 上 core.autocrlf=true 会把这些 .sh 落地成 CRLF，CI 里因此做了一次「行尾归一」；
+#   有这条规则后，任何平台 clone 出来都是 LF，CI 那一步只是兜底。）
+*.sh    text eol=lf
+
+# 二进制资源不做换行转换，也不做文本 diff。
+*.png   binary
+*.jpg   binary
+*.ico   binary

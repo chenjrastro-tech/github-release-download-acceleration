@@ -337,8 +337,15 @@ if ((Test-Path -LiteralPath $testsRunner) -and (Test-Path -LiteralPath $testsSer
 # ---------- 9. 最小版自举 + 文档体积 + CI ----------
 $skillText = Read-Utf8 $skillPath
 $skillBytes = [Text.Encoding]::UTF8.GetByteCount($skillText)
-if ($skillBytes -le 65536) { Ok "SKILL.md 体积 $skillBytes 字节（<= 64KB 上限）" }
-else { Bad "SKILL.md 已 $skillBytes 字节，超过 64KB 上限（拆到 references/）" }
+if ($skillBytes -le 65536) {
+  Ok "SKILL.md 体积 $skillBytes 字节（<= 64KB 上限）"
+  # 0–10 步的 powershell 代码块是 build-runner.ps1 生成 ghdl.ps1 的唯一真源，不能拆进 references/，
+  # 所以余量只能靠收紧文案。余量 < 2KB 时提前提醒，别等下一次改动直接 FAIL。
+  $headroom = 65536 - $skillBytes
+  if ($headroom -lt 2048) {
+    Write-Host ("[INFO] SKILL.md 仅剩 $headroom 字节余量：新增内容请放 references/，或先收紧现有文案（0–10 步代码块不可拆，build-runner 依赖它们）") -ForegroundColor Yellow
+  }
+} else { Bad "SKILL.md 已 $skillBytes 字节，超过 64KB 上限（拆到 references/）" }
 
 $miniSh = Join-Path $SkillRoot 'scripts\ghdl-min.sh'
 if (-not (Test-Path -LiteralPath $miniSh)) {

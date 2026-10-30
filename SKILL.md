@@ -766,7 +766,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 
 ### 其他分发渠道（不是 GitHub Release 时）
 
-- 镜像/厂商分发站（`registry.npmmirror.com` 的 `ffmpeg-static` 目录、官方 CDN 等）常比 GitHub Release 稳，但 **TODO：本技能未实测这些路径的目录结构与校验方式**，用之前先按第 4 步同样手法做 Range 实测，不要照抄 URL 猜文件名。
+- 镜像/厂商分发站（`registry.npmmirror.com` 的 `ffmpeg-static` 目录、官方 CDN 等）常比 GitHub Release 稳，但 **本技能没有覆盖这些站点的目录结构与校验方式**：用之前先按第 4 步同样手法做 Range 实测，不要照抄 URL 猜文件名。
 - 装完必须实跑 `ffmpeg -version` 之类冒烟并核 libx264/aac 等编码器，别只看文件存在（与第 9 步同一原则）。
 
 ## Pitfalls
