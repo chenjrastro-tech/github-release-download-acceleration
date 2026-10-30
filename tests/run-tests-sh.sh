@@ -4,7 +4,7 @@
 #   前置：bash 3.2+、curl、python3（只用来起本地假服务器并算期望 SHA256）
 #   用法：bash tests/run-tests-sh.sh [port]
 #
-# 覆盖：单流 / 分段 / 续传 / 不支持 Range / 404 / 截断包 / 退出码
+# 覆盖：单流 / 分段 / 续传 / 不支持 Range / 404 / 截断包 / P2SP / 死源 / 坏分片 / 幂等 / KEEP_TMP / 冒烟 / 退出码
 # 与 Windows 侧 tests/run-tests.ps1 是姊妹套件，改契约时两边一起改。
 set -u
 
@@ -125,6 +125,41 @@ OUT=$(run "$WORK/t7" PARTS=8 "P2SP_URLS=http://127.0.0.1:$PORT2/big.bin" -- "$BA
 kill "$SRV2_PID" 2>/dev/null
 if [ $RC -eq 0 ] && has "$OUT" "POOL: 2"; then ok "双源都进池"; else bad "P2SP 双源" "rc=$RC"; printf '%s\n' "$OUT" | grep -E 'POOL|route=' | head -3; fi
 if [ -f "$WORK/t7/big.bin" ] && [ "$(wc -c <"$WORK/t7/big.bin")" = 67108864 ]; then ok "双源拼装字节正确"; else bad "双源拼装字节"; fi
+
+echo "[8] 死 P2SP 源（不可达端口）不影响正经源"
+OUT=$(run "$WORK/t8" PARTS=8 "P2SP_URLS=http://127.0.0.1:1/big.bin" -- "$BASE/big.bin"); RC=$?
+if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t8/big.bin" 2>/dev/null)" = 67108864 ]; then ok "死源被丢弃，仍拼装完整"; else bad "死 P2SP 源" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; fi
+
+echo "[9] 坏分片（长度超出应有值）→ 丢弃重下"
+D9="$WORK/t9/big.bin.parts"
+mkdir -p "$D9"
+printf '%s %s %s\n' 67108864 8388608 8 > "$D9/manifest"
+"$PY" - "$D9" <<'PY'
+import sys
+d = sys.argv[1]
+with open(d + "/p001.bin", "wb") as f:      # 第 1 段应为 8,388,608，故意写 9,000,000
+    f.write(b"\x00" * 9000000)
+PY
+OUT=$(run "$WORK/t9" PARTS=8 -- "$BASE/big.bin"); RC=$?
+if [ $RC -eq 0 ] && [ "$(wc -c <"$WORK/t9/big.bin" 2>/dev/null)" = 67108864 ]; then ok "坏分片被丢弃重下"; else bad "坏分片处理" "rc=$RC"; printf '%s\n' "$OUT" | tail -4; fi
+GOT=$(sha256sum "$WORK/t9/big.bin" 2>/dev/null | cut -d' ' -f1)
+[ -z "$GOT" ] && GOT=$(openssl dgst -sha256 -r "$WORK/t9/big.bin" 2>/dev/null | cut -d' ' -f1)
+[ "$GOT" = "$EXP" ] && ok "坏分片重下后内容一致" || bad "坏分片后内容" "got=${GOT:0:12}"
+
+echo "[10] 幂等：成品已完整 → ALREADY_DONE 不重下"
+OUT=$(run "$WORK/t10" -- "$BASE/ok.bin"); RC1=$?
+BEFORE=$(wc -c <"$WORK/t10/ok.bin" 2>/dev/null)
+OUT2=$(run "$WORK/t10" -- "$BASE/ok.bin"); RC2=$?
+if [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && has "$OUT2" "ALREADY_DONE"; then ok "第二次直接跳过"; else bad "幂等" "rc1=$RC1 rc2=$RC2"; printf '%s\n' "$OUT2" | tail -3; fi
+
+echo "[11] KEEP_TMP=1 保留现场"
+OUT=$(run "$WORK/t11" KEEP_TMP=1 -- "$BASE/ok.bin"); RC=$?
+KEPT=$(printf '%s\n' "$OUT" | sed -n 's/^TMPD_KEPT=//p' | head -1)
+if [ $RC -eq 0 ] && [ -n "$KEPT" ] && [ -d "$KEPT" ]; then ok "临时目录被保留（$KEPT）"; rm -rf "$KEPT"; else bad "KEEP_TMP" "rc=$RC kept=$KEPT"; fi
+
+echo "[12] 未知后缀不因冒烟失败"
+OUT=$(run "$WORK/t12" SMOKE=1 -- "$BASE/ok.bin"); RC=$?
+if [ $RC -eq 0 ] && printf '%s' "$OUT" | grep -qE 'smoke=(SKIP|ok)'; then ok "冒烟对 .bin 走 SKIP 不误报"; else bad "后缀冒烟" "rc=$RC"; printf '%s\n' "$OUT" | tail -3; fi
 
 echo "----------------------------------------"
 if [ $FAIL -eq 0 ]; then echo "TESTS_SH_OK: $PASS 项通过"; exit 0; fi

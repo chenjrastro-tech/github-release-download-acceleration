@@ -188,7 +188,7 @@ api_get() { # $1=url $2=out $3=extra header(可空)
   local args
   set +u
   args=(-sS -L --connect-timeout 5 --max-time 25 -A 'Mozilla/5.0')
-  [ -n "$http_proxy_url" ] && args+=(--proxy "$http_proxy_url")
+  if [ -n "$http_proxy_url" ]; then args+=(--proxy "$http_proxy_url"); else args+=(--noproxy "*"); fi
   [ -n "${3:-}" ] && args+=(-H "$3")
   set -e
   curl "${args[@]}" -o "$2" -w '%{http_code}' "$1" 2>/dev/null || echo 000
@@ -197,14 +197,14 @@ api_get() { # $1=url $2=out $3=extra header(可空)
 if [ "$DIRECT" = "1" ]; then
   set +u
   hdr_args=(-sS -L --connect-timeout 5 --max-time 20 -r 0-0 -A 'Mozilla/5.0')
-  [ -n "$http_proxy_url" ] && hdr_args+=(--proxy "$http_proxy_url")
+  if [ -n "$http_proxy_url" ]; then hdr_args+=(--proxy "$http_proxy_url"); else hdr_args+=(--noproxy "*"); fi
   set -e
   h=$(curl "${hdr_args[@]}" -D - -o /dev/null "$URL" 2>/dev/null || true)
   cr=$(printf '%s' "$h" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Rr]ange: *bytes [0-9]*-[0-9]*\/\([0-9][0-9]*\).*/\1/p' | tail -n1)
   if [ -z "${cr:-}" ]; then
     set +u
     hl_args=(-sSI -L --connect-timeout 5 --max-time 20 -A 'Mozilla/5.0')
-    [ -n "$http_proxy_url" ] && hl_args+=(--proxy "$http_proxy_url")
+    if [ -n "$http_proxy_url" ]; then hl_args+=(--proxy "$http_proxy_url"); else hl_args+=(--noproxy "*"); fi
     set -e
     hl=$(curl "${hl_args[@]}" "$URL" 2>/dev/null | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *\([0-9][0-9]*\)$/\1/p' | tail -n1 || true)
     [ -n "${hl:-}" ] && [ "$hl" -gt 0 ] && cr=$hl
@@ -260,6 +260,15 @@ fi
 [ -n "${asset:-}" ] || { echo "BAD_URL: 没解析出资产名" >&2; exit 2; }
 if [ "$DIRECT" = "1" ]; then u="$URL"; else u="https://github.com/$repo/releases/download/$tag/$asset"; fi
 
+# 本机/内网地址：代理与公共镜像只会把请求绕远、还可能中途断，直接走原地址
+host=""
+case "$u" in *://*) host=${u#*://}; host=${host%%/*}; host=${host%%:*} ;; esac
+IS_LOCAL=0
+case "$host" in
+  localhost|127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) IS_LOCAL=1 ;;
+esac
+[ "$IS_LOCAL" = "1" ] && echo "LOCAL_TARGET: 目标是本机/内网地址（$host），跳过代理与公共镜像"
+
 # ---------- 3. 选路：每条路线真跑一次 1MB Range ----------
 : > "$TMPD/probes"
 probe() { # $1=name $2=url $3=proxy(可空)
@@ -267,14 +276,14 @@ probe() { # $1=name $2=url $3=proxy(可空)
   set +u
   a=(-sS -L --connect-timeout 5 -m 8 -r 0-1048575 -A 'Mozilla/5.0' -o /dev/null
      -w '%{http_code}|%{size_download}|%{speed_download}')
-  [ -n "${3:-}" ] && a+=(--proxy "$3")
+  if [ -n "${3:-}" ]; then a+=(--proxy "$3"); else a+=(--noproxy '*'); fi
   set -e
   out=$(curl "${a[@]}" "$2" 2>/dev/null || echo '000|0|0')
   printf '%s|%s|%s|%s\n' "$1" "$out" "$2" "${3:-}"
 }
 
 i=0
-if [ "$DIRECT" = "0" ]; then
+if [ "$DIRECT" = "0" ] && [ "$IS_LOCAL" = "0" ]; then
   for m in https://ghfast.top https://ghproxy.net https://gh-proxy.com https://github.moeyy.xyz https://gh.llkk.cc https://ghproxy.cc; do
     probe "C 镜像 $m" "$m/$u" "" >> "$TMPD/probes" &
     echo $! >> "$PIDS"
@@ -288,7 +297,7 @@ if [ -n "${P2SP_URLS:-}" ]; then
     echo $! >> "$PIDS"
   done
 fi
-if [ -n "$found_port" ]; then
+if [ -n "$found_port" ] && [ "$IS_LOCAL" = "0" ]; then
   probe "A 现有代理 :$found_port" "$u" "http://127.0.0.1:$found_port" >> "$TMPD/probes" &
   echo $! >> "$PIDS"
 elif [ -n "$PROXY" ]; then
@@ -338,7 +347,7 @@ echo "POOL: $POOL_N 条路线（$([ "$POOL_N" -ge 2 ] && echo '混拨 proxy+mirr
 if [ "${TOTAL:-0}" -le 0 ]; then
   set +u
   ra=(-sS -L --connect-timeout 5 --max-time 20 -r 0-0 -A 'Mozilla/5.0')
-  [ -n "$win_proxy" ] && ra+=(--proxy "$win_proxy")
+  if [ -n "$win_proxy" ]; then ra+=(--proxy "$win_proxy"); else ra+=(--noproxy "*"); fi
   set -e
   h=$(curl "${ra[@]}" -D - -o /dev/null "$win_url" 2>/dev/null || true)
   cr=$(printf '%s' "$h" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Rr]ange: *bytes [0-9]*-[0-9]*\/\([0-9][0-9]*\).*/\1/p' | tail -n1)
@@ -353,7 +362,7 @@ fetch_8m() {
   set +u
   a=(-sS -L --connect-timeout 3 -r 0-8388607 -A 'Mozilla/5.0' -o /dev/null
      -w '%{http_code}|%{size_download}|%{speed_download}')
-  [ -n "$win_proxy" ] && a+=(--proxy "$win_proxy")
+  if [ -n "$win_proxy" ]; then a+=(--proxy "$win_proxy"); else a+=(--noproxy "*"); fi
   set -e
   curl "${a[@]}" "$win_url" 2>/dev/null || echo '000|0|0'
 }
@@ -378,7 +387,7 @@ rung() { # $1=n → "n|kbps|full"
     set +u
     a=(-sS -L --connect-timeout 3 -m "$sec" -r "$((TOTAL / n * j))-" -A 'Mozilla/5.0'
        -o "$dir/p$j.bin" -w '%{speed_download}')
-    [ -n "$win_proxy" ] && a+=(--proxy "$win_proxy")
+    if [ -n "$win_proxy" ]; then a+=(--proxy "$win_proxy"); else a+=(--noproxy "*"); fi
     set -e
     curl "${a[@]}" "$win_url" > "$dir/s$j.txt" 2>/dev/null &
     echo $! >> "$PIDS"
@@ -461,6 +470,8 @@ curl_seg() { # $1=url $2=proxy $3=range $4=out
   if [ -n "${2:-}" ]; then
     a+=(--proxy "$2")
     [ "$HAS_PROXY_HTTP2" = "1" ] && a+=(--proxy-http2)
+  else
+    a+=(--noproxy "*")
   fi
   set -e
   curl "${a[@]}" "$1"
@@ -647,6 +658,8 @@ else
   if [ -n "$win_proxy" ]; then
     a+=(--proxy "$win_proxy")
     [ "$HAS_PROXY_HTTP2" = "1" ] && a+=(--proxy-http2)
+  else
+    a+=(--noproxy "*")
   fi
   set -e
   rc=0

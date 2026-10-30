@@ -150,7 +150,7 @@ sh scripts/ghdl.sh --help                                  # 全部选项
 - 路线池只收「回 206 且速度 ≥ 最快路线 35%」的前三条；慢路线混进来会让 1/3 的段轮流卡住。
 - 并发从 4 条起步：3 秒窗口里吞吐涨 15% 就 +2 条，卡住 2 段就砍一半。实测硬上 16 段会被节点重置（同一资产 173s），自适应后 32s。
 - 某段 6 秒不长进就算卡住：杀掉、按已下字节续传、换下一条路线重新排队，空闲 worker 接手——这就是工作窃取。
-- `GHDL_PARALLEL=1` 且 curl ≥ 7.66 时走单进程 `curl --parallel`（命令行 `--next` 分组；实测 `-K` 配置文件里的 `next` 只跑第一段）。
+- `curl --parallel` 快路径**实现过、实测过、又撤了**：P2 阶段单进程 `--parallel` 跑 16 段是 31.6s，同资产多进程自适应是 32.3s（差值在噪声内），但它只能整批跑完——某段卡死时没法只杀掉那一段再换源重排队，等于用可靠性换 0.7 秒。P3 重写引擎时移除，结论写在 `SKILL.md` Verification 里；要加回就加回，但不是默认。
 
 同机实测（2026-10-30，OBS 223.7MB，同一时段、同一节点）：
 
@@ -304,7 +304,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 
 # POSIX runner 的同款离线回归（本地假服务器 + 确定性 SHA256）
 bash tests/run-tests-sh.sh
-# TESTS_SH_OK: 11 项通过   （覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源）
+# TESTS_SH_OK: 17 项通过   （单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/死源/坏分片/幂等/KEEP_TMP/冒烟）
 # Windows 上跑要给真实解释器：PYTHON=C:/path/to/python3 bash tests/run-tests-sh.sh
 ```
 
@@ -347,14 +347,14 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。本地能跑通
 
 ### 0.3.1（未发布）
 - 新增 POSIX runner `scripts/ghdl.sh`（macOS/Linux），行为对齐 ps1：`nc` 探端口、`ulimit -n 4096`、哈希降级链、队列锁 worker 池、单段自愈、逐段强校验、manifest 续传、P2SP 双源混拨、`--connect-timeout 3` + `--speed-limit/--speed-time` 掐死慢段、不支持 Range 秒退单流、按后缀冒烟。
-- 新增 `tests/serve.py` + `tests/run-tests-sh.sh`（7 组 11 断言，离线确定性），Windows 侧套件保持 34 断言。
+- 新增 `tests/serve.py` + `tests/run-tests-sh.sh`（8 组 17 断言，离线确定性）；Windows 侧套件保持 34 断言。
 - SKILL.md 增加「环境分发」「可调参数」「支持矩阵」三节；阈值四处一致性纳入 `validate.ps1`（2c 段）。
 - 修 `-Parts` 语义：现在严格等于「段数」（之前只影响 workers，123MB 资产会退化到 5 段）。
 - 修 worker 池空路线导致的 `Attempted to divide by zero`（`POOL_EMPTY` 明确报错 + `$poolN` 兜底）。
 - 新增**进度输出**：引擎每 3 秒打一行 `progress=<done>MB/<total>MB (<pct>%) running=<n> rate=<KBps>`，静默超过 10 秒就是引擎没动（`SKILL.md` Verification 有断言）。
 - 新增**单文件自举** `scripts/ghdl-min.sh`（86 行 POSIX sh，无数组/无 `[[ ]]`）：取总长 → ≥32MB 走 8 段并发（不齐自动回落单流）→ 单流 `-C -` 续传 → 字节校验 → 可选 SHA256 三级降级。`SKILL.md` 内联同一份，`validate.ps1` 逐字比对。
 - `scripts/ghdl.sh` 补**与 ps1 对齐的命令行选项**：`-o/--outdir`、`-p/--parts`、`--force-clean`、`--force-ladder`、`--smoke 0|1`、`--keep-tmp`、`--help`；未知选项 `UNKNOWN_FLAG` exit 2（不会静默当 URL）。
-- 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 34 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 11 条 sh 套件。
+- 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 34 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 17 条 sh 套件。
   **注意**：这份工作流当前在本地分支 `ci-workflow`，还没进 `main`——`gh` 的 token 只有 `repo`/`gist`/`read:org`，GitHub 拒绝「无 `workflow` scope 的 OAuth 应用创建/更新工作流」。要启用它：`gh auth refresh -s workflow` 后推送该分支（或网页上传）。
 - `SKILL.md` 的「小文件/文本走 contents API」拆到 `references/fetch-raw-via-api.md`（正文只留 3 行指针）：`SKILL.md` 有 64KB 上限，现在 **64,433 B**，`validate.ps1` 会拦超限。
 - `curl --parallel` **评估后不采纳**（理由写在 `SKILL.md` Verification）：本仓引擎已多进程 + 逐段自愈 + 多源混拨，`--parallel -K` 只能整批跑、单段失败无法只重排那一段，收益在噪声内。

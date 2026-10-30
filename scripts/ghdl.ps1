@@ -156,16 +156,19 @@ if (-not $direct) { $u = "https://github.com/$repo/releases/download/$tag/$asset
 $mirrors = @()
 if (-not $direct) { $mirrors = @('https://ghfast.top','https://ghproxy.net','https://gh-proxy.com','https://hk.gh-proxy.com','https://github.moeyy.xyz','https://gh.llkk.cc','https://ghproxy.cc') }
 $minBytes = $(if ($direct) { 1 } else { 524288 })
+$hostName = ''; try { $hostName = ([uri]$u).Host } catch { }
+$isLocal = ($hostName -match '^(?i)(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)')
+if ($isLocal) { "LOCAL_TARGET: 目标是本机/内网地址（$hostName），跳过代理与公共镜像——它们只会把请求绕远，还可能在中途断掉；直接走原地址" }
 $probes = @()
-if ($listen.Count -gt 0) { $probes += [pscustomobject]@{ Name = "A 代理 :$($listen[0])"; Url = $u; Proxy = "http://127.0.0.1:$($listen[0])" } }
-$probes += @($mirrors | ForEach-Object { [pscustomobject]@{ Name = "C 镜像 $_"; Url = "$_/$u"; Proxy = $null } })
+if (-not $isLocal -and $listen.Count -gt 0) { $probes += [pscustomobject]@{ Name = "A 代理 :$($listen[0])"; Url = $u; Proxy = "http://127.0.0.1:$($listen[0])" } }
+if (-not $isLocal) { $probes += @($mirrors | ForEach-Object { [pscustomobject]@{ Name = "C 镜像 $_"; Url = "$_/$u"; Proxy = $null } }) }
 $probes += [pscustomobject]@{ Name = 'D 直连'; Url = $u; Proxy = $null }
 $pdir = Join-Path $env:TEMP ("probe_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
 New-Item -ItemType Directory $pdir -Force | Out-Null
 $jobs = @(foreach ($p in $probes) {
   $f = Join-Path $pdir (($p.Name -replace '[^\w]','_') + '.out')
   $a = @('-sS','-L','--connect-timeout','5','-m','8','-r','0-1048575','-A','Mozilla/5.0','-o','NUL','-w','%{http_code}|%{size_download}|%{speed_download}')
-  if ($p.Proxy) { $a += @('--proxy', $p.Proxy) }
+  if ($p.Proxy) { $a += @('--proxy', $p.Proxy) } else { $a += @('--noproxy', '*') }
   $a += $p.Url
   [pscustomobject]@{ Name = $p.Name; Url = $p.Url; Proxy = $p.Proxy; Log = $f
     Proc = (Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $f -RedirectStandardError ($f -replace '\.out$','.err')) }
@@ -190,7 +193,8 @@ Remove-Item $pdir -Recurse -Force -ErrorAction SilentlyContinue
 
 $corePid = $null
 $up = [bool](Test-Port '127.0.0.1' 7897)
-if ($up) { 'PORT_7897_ALREADY_LISTENING: 用现成的，收尾不要停' }
+if ($up -and -not $isLocal) { 'PORT_7897_ALREADY_LISTENING: 用现成的，收尾不要停' }
+elseif ($up -and $isLocal) { 'LOCAL_TARGET: 现有代理对本地地址无用，本轮单流/分段都走直连' }
 elseif ($coreDir -and $cfgDir -and (Test-Path (Join-Path $coreDir 'verge-mihomo.exe'))) {
   $core = Start-Process -FilePath (Join-Path $coreDir 'verge-mihomo.exe') -ArgumentList @('-d',$cfgDir,'-f',(Join-Path $cfgDir 'clash-verge.yaml')) -WindowStyle Hidden -PassThru
   $corePid = $core.Id
@@ -227,7 +231,7 @@ function Test-Ladder([int]$n,[string]$url,[string]$proxy,[int64]$total = 0,[int]
   $ps = @(1..$n | ForEach-Object {
     $i = $_; $s = [int64](($i - 1) * $per)
     $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$s-",'-o','NUL','-m',"$sec",'-w','%{http_code}|%{size_download}|%{speed_download}')
-    if ($proxy) { $a += @('--proxy',$proxy) }
+    if ($proxy) { $a += @('--proxy',$proxy) } else { $a += @('--noproxy','*') }
     $a += $url
     Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $dir "p$i.out") -RedirectStandardError (Join-Path $dir "p$i.err")
   })
@@ -313,7 +317,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
     $singleResume = @('-C','-'); "SINGLE_RESUME: 从 $((Get-Item $out).Length) 字节继续"
   }
   $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-H','Accept: application/octet-stream','-o',$out,'-D',"$out.headers",'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}') + $singleResume + $retry
-  if ($winProxy) { $a += @('--proxy', $winProxy) }
+  if ($winProxy) { $a += @('--proxy', $winProxy) } else { $a += @('--noproxy', '*') }
   $a += $assetUrl
   $st = (& $curlExe @a 2> "$out.err" | Out-String).Trim()
   "SINGLE exit=$LASTEXITCODE $st"
@@ -391,7 +395,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
       $tgt = $(if ($have -eq 0) { $f } else { "$f.resume" })     # 续写只写 .resume，完成后合并
       $rt = $pool[$seg.Route % $poolN]
       $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$rs-$($seg.End)",'-o',$tgt,'-m','1800') + $retry
-      if ($rt.Proxy) { $a += @('--proxy', $rt.Proxy) }
+      if ($rt.Proxy) { $a += @('--proxy', $rt.Proxy) } else { $a += @('--noproxy', '*') }
       $a += $rt.Url
       $lg = Join-Path $dir ("p{0:000}.log" -f $seg.Index)
       $pr = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $lg -RedirectStandardError ($lg -replace '\.log$', '.err')

@@ -355,16 +355,19 @@ if (-not $direct) { $u = "https://github.com/$repo/releases/download/$tag/$asset
 $mirrors = @()
 if (-not $direct) { $mirrors = @('https://ghfast.top','https://ghproxy.net','https://gh-proxy.com','https://hk.gh-proxy.com','https://github.moeyy.xyz','https://gh.llkk.cc','https://ghproxy.cc') }
 $minBytes = $(if ($direct) { 1 } else { 524288 })
+$hostName = ''; try { $hostName = ([uri]$u).Host } catch { }
+$isLocal = ($hostName -match '^(?i)(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)')
+if ($isLocal) { "LOCAL_TARGET: 目标是本机/内网地址（$hostName），跳过代理与公共镜像——它们只会把请求绕远，还可能在中途断掉；直接走原地址" }
 $probes = @()
-if ($listen.Count -gt 0) { $probes += [pscustomobject]@{ Name = "A 代理 :$($listen[0])"; Url = $u; Proxy = "http://127.0.0.1:$($listen[0])" } }
-$probes += @($mirrors | ForEach-Object { [pscustomobject]@{ Name = "C 镜像 $_"; Url = "$_/$u"; Proxy = $null } })
+if (-not $isLocal -and $listen.Count -gt 0) { $probes += [pscustomobject]@{ Name = "A 代理 :$($listen[0])"; Url = $u; Proxy = "http://127.0.0.1:$($listen[0])" } }
+if (-not $isLocal) { $probes += @($mirrors | ForEach-Object { [pscustomobject]@{ Name = "C 镜像 $_"; Url = "$_/$u"; Proxy = $null } }) }
 $probes += [pscustomobject]@{ Name = 'D 直连'; Url = $u; Proxy = $null }
 $pdir = Join-Path $env:TEMP ("probe_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
 New-Item -ItemType Directory $pdir -Force | Out-Null
 $jobs = @(foreach ($p in $probes) {
   $f = Join-Path $pdir (($p.Name -replace '[^\w]','_') + '.out')
   $a = @('-sS','-L','--connect-timeout','5','-m','8','-r','0-1048575','-A','Mozilla/5.0','-o','NUL','-w','%{http_code}|%{size_download}|%{speed_download}')
-  if ($p.Proxy) { $a += @('--proxy', $p.Proxy) }
+  if ($p.Proxy) { $a += @('--proxy', $p.Proxy) } else { $a += @('--noproxy', '*') }
   $a += $p.Url
   [pscustomobject]@{ Name = $p.Name; Url = $p.Url; Proxy = $p.Proxy; Log = $f
     Proc = (Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $f -RedirectStandardError ($f -replace '\.out$','.err')) }
@@ -395,7 +398,8 @@ Remove-Item $pdir -Recurse -Force -ErrorAction SilentlyContinue
 ```powershell
 $corePid = $null
 $up = [bool](Test-Port '127.0.0.1' 7897)
-if ($up) { 'PORT_7897_ALREADY_LISTENING: 用现成的，收尾不要停' }
+if ($up -and -not $isLocal) { 'PORT_7897_ALREADY_LISTENING: 用现成的，收尾不要停' }
+elseif ($up -and $isLocal) { 'LOCAL_TARGET: 现有代理对本地地址无用，本轮单流/分段都走直连' }
 elseif ($coreDir -and $cfgDir -and (Test-Path (Join-Path $coreDir 'verge-mihomo.exe'))) {
   $core = Start-Process -FilePath (Join-Path $coreDir 'verge-mihomo.exe') -ArgumentList @('-d',$cfgDir,'-f',(Join-Path $cfgDir 'clash-verge.yaml')) -WindowStyle Hidden -PassThru
   $corePid = $core.Id
@@ -436,7 +440,7 @@ function Test-Ladder([int]$n,[string]$url,[string]$proxy,[int64]$total = 0,[int]
   $ps = @(1..$n | ForEach-Object {
     $i = $_; $s = [int64](($i - 1) * $per)
     $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$s-",'-o','NUL','-m',"$sec",'-w','%{http_code}|%{size_download}|%{speed_download}')
-    if ($proxy) { $a += @('--proxy',$proxy) }
+    if ($proxy) { $a += @('--proxy',$proxy) } else { $a += @('--noproxy','*') }
     $a += $url
     Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $dir "p$i.out") -RedirectStandardError (Join-Path $dir "p$i.err")
   })
@@ -528,7 +532,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
     $singleResume = @('-C','-'); "SINGLE_RESUME: 从 $((Get-Item $out).Length) 字节继续"
   }
   $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-H','Accept: application/octet-stream','-o',$out,'-D',"$out.headers",'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}') + $singleResume + $retry
-  if ($winProxy) { $a += @('--proxy', $winProxy) }
+  if ($winProxy) { $a += @('--proxy', $winProxy) } else { $a += @('--noproxy', '*') }
   $a += $assetUrl
   $st = (& $curlExe @a 2> "$out.err" | Out-String).Trim()
   "SINGLE exit=$LASTEXITCODE $st"
@@ -606,7 +610,7 @@ elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
       $tgt = $(if ($have -eq 0) { $f } else { "$f.resume" })     # 续写只写 .resume，完成后合并
       $rt = $pool[$seg.Route % $poolN]
       $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$rs-$($seg.End)",'-o',$tgt,'-m','1800') + $retry
-      if ($rt.Proxy) { $a += @('--proxy', $rt.Proxy) }
+      if ($rt.Proxy) { $a += @('--proxy', $rt.Proxy) } else { $a += @('--noproxy', '*') }
       $a += $rt.Url
       $lg = Join-Path $dir ("p{0:000}.log" -f $seg.Index)
       $pr = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $lg -RedirectStandardError ($lg -replace '\.log$', '.err')
@@ -776,6 +780,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - **拼装后还要 SHA256 + 冒烟**：`final bytes=45,473,280 match=True` 只是必要条件，还要 `sha256` 对 digest、`--version` 输出 31.8.0 才算「没坏」。
 - **冒烟命令别用 `2>&1`**：原生程序把 ANSI 进度写 stderr，5.1 会变成终止错误；用 `& $out --version *> $verF` 再读文件。
 - **`Invoke-RestMethod` 打 api.github.com 可能直接失败，别在同一 cmdlet 上重试**：换 `curl.exe -sS -m 40 -H 'User-Agent: dsh-agent' -H 'Accept: application/vnd.github+json' -o <临时文件>`，再 `Get-Content -Raw | ConvertFrom-Json`。
+- **无代理路线必须 `--noproxy *`**：curl 默认吃 `HTTP_PROXY` 等环境变量，残留的死代理会把「直连」一起打成 000。本机/内网目标（`localhost`、`127.*`、`10.*`、`192.168.*`、`172.16-31.*`）不打代理、不试镜像，只印 `LOCAL_TARGET:` 走原地址；ps1/sh 两侧同规则。
 - **决定代理前先判端口**：`Test-NetConnection -ComputerName 127.0.0.1 -Port 7897 -InformationLevel Quiet`（或并发 TcpClient 批量探）返回 False 就别加 `--proxy`——实测 `proxy7897=False` 时直连 200，加代理只会 000。
 - **`Port open: False` 不等于代理已启用，`ProxyServer` 残留值也不等于**（`ProxyEnable: 0` 仍留着 `127.0.0.1:7897`）。
 - **资产名对不上必须 `ASSET_NOT_FOUND` + 候选清单，禁止静默换名**；API 200 ≠ 资产名对，API 403 也不是 NO_ROUTE。
@@ -806,7 +811,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - **版本对比先取证再下结论**：`git tag --list` 核实真实 tag（本项目是 `v0.1.0` / `v0.2.0` / `v0.2.1`，**没有** 1.0），再 `git diff --stat <base>..HEAD` 给文件数与增删行数；不许自设「里程碑」当基准，也不许用分条清单代替按维度标新增/重写/沿用的对比表。
 - TODO：宿主已装 aria2c 时可用 `aria2c -x16 -s16 --all-proxy=...` 替代手写分段，未实测，暂不纳入默认流程。
 
-- `curl --parallel`（单进程内并发）评估后**不采纳**：本仓 ps1/sh 引擎已经是「多进程 + 逐段自愈 + 多源混拨」，`--parallel -K cfg` 只能整批跑完、单段失败无法只重排队那一段；在本机同资产对照里并发的收益来自「连接数」而不是「进程数」，换成一进程反而丢掉按段换源（实测差距在噪声内，未采纳）。
+- `curl --parallel`（单进程内并发）**实现过、实测过、又撤了**：P2 阶段 16 段同资产对照 `--parallel` 31.6s vs 多进程自适应 32.3s（噪声内），但 `--parallel -K cfg` 只能整批跑完，单段卡死时无法只杀那一段、换源、续传重排队——等于拿可靠性换 0.7 秒。P3 重写引擎时移除；若要加回，作为可选快路径，不当默认。
 - `SKILL.md` 有 64KB 硬上限（部分宿主把超大 SKILL.md 截断）：新增内容先看 `validate.ps1` 的体积行，逼近上限就把长表拆到 `references/`。
 
 ## Verification
@@ -827,7 +832,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - **限速节点分支**：只跑 1/16 两档、每档三遍，逐档输出「完成 n/n」、中位与 min–max，最后 `LADDER_DONE: … winN=…`；不出现 4 段档。
 - **P3 断言**：直链走 `direct=True`；重跑命中 `ALREADY_DONE` 或 `RESUME_PLAN`；逐段不符必须 `SEGMENT_SIZE_MISMATCH` + 退出码 1 + `PARTS_KEPT`（且不能打印 `DOWNLOAD_VERIFIED_OK`）。
 - **跨平台分发**：Windows 跑 `scripts/ghdl.ps1`，macOS/Linux 跑 `scripts/ghdl.sh`；两边日志都应有 `skip_ladder`/`SKIP_LADDER` 与同一组阈值（100MB / 3072KB/s）。
-- **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源；Windows 上跑要给 `PYTHON=<真实 python3>`（应用商店的 `python3` 是空壳）。2026-10-30 在 Git Bash 上实测 `TESTS_SH_OK: 11 项通过`。
+- **macOS 侧回归（离线）**：`bash tests/run-tests-sh.sh` 用 `tests/serve.py` 起本地假服务器，覆盖单流/8 段/续传/不支持 Range/404/截断包/P2SP 双源/P2SP 死源/坏分片/幂等/KEEP_TMP/后缀冒烟；Windows 上跑要给 `PYTHON=<真实 python3>`（应用商店的 `python3` 是空壳）。2026-10-30 在 Git Bash 上实测 `TESTS_SH_OK: 17 项通过`。
 - **收尾**：`7897` 不再监听、无本次 `verge-mihomo` 残留、`ProxyEnable` 与开始时一致。
 - **文件体积**：`(Get-Item SKILL.md).Length` ≤ 65536（上限硬约束）。
 
