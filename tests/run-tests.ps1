@@ -285,6 +285,27 @@ try {
   Check (Has $o15 'IWR_FALLBACK') '印出 IWR_FALLBACK'
   $f15 = Join-Path $d15 'ok.bin'
   Check ((Test-Path $f15) -and (Get-Item $f15).Length -eq 3145728) 'IWR 落盘字节=3145728'
+
+  # ---------- 16) 服务端确定性故障：403 / 503(+Retry-After) / 429 必须干净失败、不落半成品
+  "`n[16] 服务端故障码（403 / 503+Retry-After / 429）"
+  foreach ($code in 403, 503, 429) {
+    $d16 = Join-Path $Work ("fault$code")
+    $sw16 = [Diagnostics.Stopwatch]::StartNew()
+    $o16 = Invoke-Ghdl "$Base/e$code.bin" $d16
+    $c16 = $LASTEXITCODE
+    $sw16.Stop()
+    $f16 = Join-Path $d16 "e$code.bin"
+    Check ($c16 -ne 0) "$code 必须非 0 退出" "exit=$c16"
+    Check (Has $o16 "$code") "$code 的状态码要出现在输出里（可解释失败）" ''
+    Check ((Test-Path $f16) -eq $false) "$code 失败后不留半成品文件" ('left=' + (Test-Path $f16))
+    # 5xx 在「探测」阶段就判定不可用：这里要的是一次干净的快速失败（不让用户等重试），
+    # 而不是伪装成已做退避。真正的重试发生在下载过程中（curl --retry），见 Pitfalls。
+    Check ($sw16.Elapsed.TotalSeconds -lt 30) "$code 快速失败（<30s，不空转重试）" ("elapsed=$([math]::Round($sw16.Elapsed.TotalSeconds,1))s")
+    if ($code -eq 503) {
+      Check (Has $o16 'NO_ROUTE') '503 报 NO_ROUTE（说明探测阶段无可用路线）' ''
+    }
+    if (-not (Test-Path $d16)) { New-Item -ItemType Directory -Path $d16 -Force | Out-Null }
+  }
 } finally {
   if ($ownServer) { Stop-Process -Id $ownServer.Id -Force -ErrorAction SilentlyContinue }
   if (-not $Keep) { Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }

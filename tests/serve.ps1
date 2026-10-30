@@ -33,6 +33,10 @@ $specs = @{
   '/short.bin'   = @{ Total = 2097152;   Mode = 'short'; Send = 716800 }
   '/norange.bin' = @{ Total = 1048576;   Mode = 'norange' }
   '/huge.bin'    = @{ Total = 1880743936; Mode = 'ok' }
+  # 故障端点：永远返回同一个状态码，用来验证「失败要干净、可解释、不落半成品」
+  '/e403.bin'    = @{ Total = 0; Mode = 'status'; Code = 403; Reason = 'Forbidden' }
+  '/e503.bin'    = @{ Total = 0; Mode = 'status'; Code = 503; Reason = 'Service Unavailable'; RetryAfter = 1 }
+  '/e429.bin'    = @{ Total = 0; Mode = 'status'; Code = 429; Reason = 'Too Many Requests' }
 }
 
 $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
@@ -90,6 +94,17 @@ while ($true) {
 
     $spec = $specs[$path]
     $total = [int64]$spec.Total
+
+    # --- 故障端点：直接回状态码，不返回任何字节内容
+    if ($spec.Mode -eq 'status') {
+      $msg = [System.Text.Encoding]::ASCII.GetBytes("status $($spec.Code)")
+      $extra = $(if ($spec.ContainsKey('RetryAfter')) { "Retry-After: $($spec.RetryAfter)`r`n" } else { '' })
+      $h = "HTTP/1.1 $($spec.Code) $($spec.Reason)`r`nContent-Type: text/plain`r`nContent-Length: $($msg.Length)`r`n${extra}Connection: close`r`n`r`n"
+      $hb = [System.Text.Encoding]::ASCII.GetBytes($h)
+      $stream.Write($hb, 0, $hb.Length); $stream.Write($msg, 0, $msg.Length); $stream.Flush()
+      continue
+    }
+
 
     # --- Range 解析
     $rs = [int64]0; $re = $total - 1; $hasRange = $false

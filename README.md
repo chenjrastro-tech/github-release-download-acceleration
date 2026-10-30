@@ -189,6 +189,12 @@ sh scripts/ghdl.sh --help                                  # 全部选项
 
 **「真零前置」的可验证定义**：PATH 只留系统目录、清空 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`、不登录任何账号、非管理员用户，仍能完成一次真实下载并通过校验。Windows 侧已按这个口径实测通过——非管理员会话、PATH 只剩 `C:\Windows{,\system32,\System32\WindowsPowerShell\v1.0}`，靠端口探测找到本机 7897，最后 SHA256 与 release digest 一致。
 
+### 服务端故障码（403 / 503 / 429）
+
+`tests/serve.ps1` 提供 `/e403.bin`、`/e503.bin`（带 `Retry-After: 1`）、`/e429.bin` 三个永远返回同一状态码的端点，套件 [16] 断言：这几种情况下 runner 必须 **非 0 退出、输出里能看到状态码、且不落半成品文件**，并在 30 秒内失败。
+
+有一点要说明白：**5xx 在「探测」阶段就判定不可用，不在这里重试**——重试发生在下载过程中（`curl --retry 3 --retry-delay 2`，curl ≥7.71 时再加 `--retry-all-errors`）。之所以不在探测阶段重试，是因为探测本身要并发跑 7 条路线，每条都退避会把这步从秒级拖到分钟级，而你看到的状态码已经足够判断该换路线还是该去查权限。
+
 ### 本地基准（入库、可复跑）
 
 `tests\bench.ps1` 用 `tests/serve.ps1` 起本地假服务器，对同一资产跑「强制单流」与「强制 16 段」各 N 遍取中位数，读 runner 的 `RESULT_JSON`：
@@ -339,7 +345,7 @@ metadata:
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 # 端口默认自动挑空闲的；要复现/排查时指定：-Port 19000
 # 端口被上一次异常中断留下的 serve.ps1 占着时，会先 SERVER_REAP 清掉再起新的（只清本仓库 tests\serve.ps1）
-# TESTS_OK: 46 项通过
+# TESTS_OK: 59 项通过
 
 # POSIX runner 的同款离线回归（本地假服务器 + 确定性 SHA256）
 bash tests/run-tests-sh.sh
@@ -350,7 +356,7 @@ bash tests/run-tests-sh.sh
 `tests/serve.ps1` 用 `TcpListener` 在本机起一个假 Release 服务（支持 Range，也能模拟「只发 700KB 就断」和「根本不支持 Range」），
 `scripts/ghdl.sh` 同样支持任意 https 直链（`sh scripts/ghdl.sh <url>`，输出目录用 `OUTDIR`）、断点续传与幂等。
 
-`tests/run-tests.ps1` 会先用 1 字节 range 请求验明「端口上跑的确实是本仓库的 serve.ps1」，不是就直接报错退出（避免复用旧实例导致假失败）；然后跑 15 组场景 46 条断言：单流、幂等重跑、`-ForceClean`、16 段分段（123,456,789 B，非段长整数倍）、新增：同一 OutDir 并发两个资产（分片目录按资产隔离）、没有 curl.exe 时改用 Invoke-WebRequest 单流降级。
+`tests/run-tests.ps1` 会先用 1 字节 range 请求验明「端口上跑的确实是本仓库的 serve.ps1」，不是就直接报错退出（避免复用旧实例导致假失败）；然后跑 16 组场景 59 条断言：单流、幂等重跑、`-ForceClean`、16 段分段（123,456,789 B，非段长整数倍）、同一 OutDir 并发两个资产（分片目录按资产隔离）、没有 curl.exe 时改用 Invoke-WebRequest 单流降级、服务端 403/503/429 必须快速失败且不留半成品。
 续传（预置 manifest + 半个分片）、坏分片（长度不符）、短包、无 Range 服务器、全灭路线。
 不需要外网、不需要 GitHub 账号、不需要装任何东西；跑完自动清 `%TEMP%\ghdl_tests`（加 `-Keep` 保留现场）。
 
@@ -433,7 +439,7 @@ macOS/Linux 版 `ghdl.sh` 与 Windows 版对齐到同一套行为，并修掉只
 - 新增**进度输出**：引擎每 3 秒打一行 `progress=<done>MB/<total>MB (<pct>%) running=<n> rate=<KBps>`，静默超过 10 秒就是引擎没动（`SKILL.md` Verification 有断言）。
 - 新增**单文件自举** `scripts/ghdl-min.sh`（86 行 POSIX sh，无数组/无 `[[ ]]`）：取总长 → ≥32MB 走 8 段并发（不齐自动回落单流）→ 单流 `-C -` 续传 → 字节校验 → 可选 SHA256 三级降级。`SKILL.md` 内联同一份，`validate.ps1` 逐字比对。
 - `scripts/ghdl.sh` 补**与 ps1 对齐的命令行选项**：`-o/--outdir`、`-p/--parts`、`--force-clean`、`--force-ladder`、`--smoke 0|1`、`--keep-tmp`、`--help`；未知选项 `UNKNOWN_FLAG` exit 2（不会静默当 URL）。
-- 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 46 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 23 条 sh 套件。
+- 新增**三平台 CI** `.github/workflows/test.yml`：Windows 跑 `validate.ps1` + `build-runner -Check` + 59 条 ps1 套件；Ubuntu/macOS 跑 `bash -n scripts/ghdl.sh` + 23 条 sh 套件。
   推送它需要 token 带 `workflow` scope（`gh auth refresh -s workflow`），已补；工作流已并入 `main`，三平台 job 全绿。
 - `SKILL.md` 的「小文件/文本走 contents API」拆到 `references/fetch-raw-via-api.md`（正文只留 3 行指针）：`SKILL.md` 有 64KB 上限，现在 **64,433 B**，`validate.ps1` 会拦超限。
 - `curl --parallel` **评估后不采纳**（理由写在 `SKILL.md` Verification）：本仓引擎已多进程 + 逐段自愈 + 多源混拨，`--parallel -K` 只能整批跑、单段失败无法只重排那一段，收益在噪声内。
@@ -468,7 +474,7 @@ macOS/Linux 版 `ghdl.sh` 与 Windows 版对齐到同一套行为，并修掉只
 - **单流「三方差一」**：下完比对响应头 `Content-Length` 与 `total`，不等即 `SIZE_MISMATCH`（短包不再靠运气）；重定向链上取最后一个 `Content-Length`。
 - **POSIX `ghdl.sh`**：直链、续传（`.parts/manifest`）、幂等、`FORCE_CLEAN=1`、孤儿清理（`pgrep -f`，Windows 上无 `pgrep` 时降级），三级 `sha256sum`/`shasum`/`openssl` 降级。**Git Bash、ubuntu-latest、macos-latest 三处都跑过 23 条 sh 套件（CI 绿）；`dash`/`busybox`/`ksh` 由 `tests/run-tests-min-shells.sh` 在 CI 的 `min-shells` job 里实测跑通 `ghdl-min.sh`（单流 3MB + 分段 64MB，含 SHA256）。**
 - **段粒度**：段数上限 64 → 128，让 1–3GB 资产的段大小仍守在 24MB 内。实测：1.2GB Godot 资产 `-Parts 8` → 49 段 / 23.4MB，SHA256 与 digest 一致；本地 1.75GB → 75 段 / 10.8s。
-- **证据与回归**：真零前置实测（PATH 只剩系统目录、清空代理环境变量、非管理员，仍靠端口探测选中代理下载并校验通过）；`tests/run-tests.ps1` 15 组 46 条离线断言（含直链 404、死代理端口、`-Parts 64` 并发夹取），套件开跑前先验明端口上确实是本仓库的 `serve.ps1`，否则明确报错。
+- **证据与回归**：真零前置实测（PATH 只剩系统目录、清空代理环境变量、非管理员，仍靠端口探测选中代理下载并校验通过）；`tests/run-tests.ps1` 16 组 59 条离线断言（含直链 404、死代理端口、`-Parts 64` 并发夹取），套件开跑前先验明端口上确实是本仓库的 `serve.ps1`，否则明确报错。
 
 - **2026-10-29（最新）**：发布到 npm，包名 **`github-release-accelerator`**（`0.2.1`）——npm registry 拒绝包名里出现 `download`（`400 That word is not allowed`），所以 npm 发布名去掉该词，仓库名与技能名不变；`cordis.patch.yml` 的 `name` 随之改为包名（`id` 仍是技能名），`validate.ps1` 允许包名与目录名不同。新增市场卡片图标与三张实测截图（`assets/` + `screenshots.json`），PR 条目补 `icon:`。
 - 2026-10-29：打包成可进插件市场的插件包 —— 新增 `package.json`（声明 `dsh.bundle.patch`）、`cordis.patch.yml`、`index.js`（技能 provider，零依赖，把包内 `SKILL.md` 挂进 `ctx.skills`，`source: bundled`、rank 600）。版本号提到 **0.2.0**。技能正文与阈值未变，`validate.ps1` 仍 `VALIDATE_OK`。

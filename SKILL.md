@@ -434,7 +434,7 @@ echo "MIN_OK: $dst ($got 字节)"
     Select-String -Path SKILL.md,README.md,scripts\*.ps1 -Pattern 'build-runner|references/|65,536|65536|64 ?KB'
     ```
 
-    「从本文件的围栏块生成」、README 目录树缺 `references/`、「18 条」这类旧话要一起改；断言条数以实测为准（sh 23 条 / ps1 46 条）。
+    「从本文件的围栏块生成」、README 目录树缺 `references/`、「18 条」这类旧话要一起改；断言条数以实测为准（sh 23 条 / ps1 59 条）。
 
 7. **收尾闸（缺一不算完）**：
 
@@ -445,7 +445,7 @@ echo "MIN_OK: $dst ($got 字节)"
     bash tests/run-tests-sh.sh        # Windows 上先设 PYTHON=<真实 python3>
     ```
 
-    期望顺序：`GENERATED` → `VALIDATE_OK` → `TESTS_OK: 46 项通过` → `TESTS_SH_OK: 23 项通过`；再跑 `build-runner.ps1 -Check` 拿 `GENERATE_OK: runner 与 references/runner-steps.md 同步`。拆分不改下载逻辑，套件失败先查环境（`PYTHON` 未设、`bash` 不在 PATH），别急着改代码——本窗口 sh 套件唯一一次失败就是没设 `PYTHON`。
+    期望顺序：`GENERATED` → `VALIDATE_OK` → `TESTS_OK: 59 项通过` → `TESTS_SH_OK: 23 项通过`；再跑 `build-runner.ps1 -Check` 拿 `GENERATE_OK: runner 与 references/runner-steps.md 同步`。拆分不改下载逻辑，套件失败先查环境（`PYTHON` 未设、`bash` 不在 PATH），别急着改代码——本窗口 sh 套件唯一一次失败就是没设 `PYTHON`。
 
 8. **BOM 与 LF 是两条独立红线**：`scripts/*.ps1`、`tests/*.ps1` 必须带 BOM；`SKILL.md`、`references/*.md`、`*.sh` 不能带 BOM 且全文 LF。用字节回读验证（前 3 字节是否 `EF BB BF`、`\r\n` 计数是否为 0），不要只看编辑器显示。
 
@@ -470,7 +470,7 @@ echo "MIN_OK: $dst ($got 字节)"
 5. **进度采样用一次 `du`，不要 16 次 `wc -c`**：逐个 `wc` 会被正在写的分片拖住（Windows 共享冲突时还能让进度线程被 `set -e` 杀掉），短下载（<5 秒）几乎采不到点；改成 `du -sk "$TMPD"` 一次遍历。
 6. **curl 部分成功（rc=28）先取第一行再解析六列**：`out=$(curl … || echo '000|0|0')` 在「收到一部分后超时」会追加第二行，六列错位（实测选错路线、代理字段变 `0.0.0.0`）。正确写法 `out=$(curl …) || true`，再取第一行解析。
 7. **测试夹具 TcpListener 要设 SendTimeout/ReceiveTimeout**：`tests/serve.ps1` 只设 `ReceiveTimeout` 不够，半开连接会卡死串行夹具，表现为「同一 OutDir 并发两个资产」两项都没有 exit code；给每个连接补 `SendTimeout` 后 ps1 套件 46/46。
-8. **收尾判据**：日志里要有 `RAMP_UP`/`BACKOFF`/`progress=` 行、`engine_done=… elapsed=…`、`TESTS_SH_OK: 23 项通过`、`TESTS_OK: 46 项通过`；光 exit=0 不算对齐。sh 套件有时序，改完连跑 5 次都绿再收工。
+8. **收尾判据**：日志里要有 `RAMP_UP`/`BACKOFF`/`progress=` 行、`engine_done=… elapsed=…`、`TESTS_SH_OK: 23 项通过`、`TESTS_OK: 59 项通过`；光 exit=0 不算对齐。sh 套件有时序，改完连跑 5 次都绿再收工。
 
 ### 发布自查：一个版本「发全」要四份证据
 
