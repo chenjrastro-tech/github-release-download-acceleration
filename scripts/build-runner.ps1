@@ -1,14 +1,16 @@
 ﻿#requires -Version 5.1
 <#
-  build-runner.ps1 —— 由 SKILL.md 生成「一次性 runner」scripts/ghdl.ps1
+  build-runner.ps1 —— 由 references/runner-steps.md 生成「一次性 runner」scripts/ghdl.ps1
 
-  为什么生成而不是手写：SKILL.md 里的 12 个代码块就是这套流程的唯一真源。
+  为什么生成而不是手写：references/runner-steps.md 里的 11 个代码块就是这套流程的唯一真源。
   手写第二份实现必然会和正文漂移（历史上已经吃过一次亏），所以 runner 用
-  同一批代码块拼出来，改 SKILL.md 后重跑本脚本即可。
+  同一批代码块拼出来，改步骤后重跑本脚本即可。
+  为什么真源不在 SKILL.md 里：SKILL.md 有 65,536 字节的硬上限（宿主按正文长度截断/拒收），
+  把 30KB+ 的运行时代码留在正文会把索引挤爆。SKILL.md 只留步骤说明与指针。
   生成时会替换 3 处只有交互式执行才需要的东西：
-    1. 第 0 块的示例 URL → 改成 -Url 参数
-    2. 第 6 块的 $ForceLadder = $false → 改成 -ForceLadder 开关
-    3. 第 7 块的 ~/Downloads → 改成 -OutDir 参数
+    1. 块 0 的示例 URL → 改成 -Url 参数
+    2. 块 6 的 $ForceLadder = $false → 改成 -ForceLadder 开关
+    3. 块 7 的 ~/Downloads → 改成 -OutDir 参数
   其余开关（-ForceClean / -KeepParts / -Parts）由下面的 head 模板直接注入，正文块按变量名读取。
 
   用法：
@@ -17,7 +19,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$SkillMd,
+  [string]$StepsMd,
   [string]$OutFile,
   [switch]$Check
 )
@@ -28,15 +30,17 @@ $ErrorActionPreference = 'Stop'
 $here = $MyInvocation.MyCommand.Path
 if (-not $here) { $here = $PSCommandPath }
 $here = Split-Path -Parent $here
-if (-not $SkillMd) { $SkillMd = Join-Path (Split-Path -Parent $here) 'SKILL.md' }
+$root = Split-Path -Parent $here
+if (-not $StepsMd) { $StepsMd = Join-Path $root 'references\runner-steps.md' }
 if (-not $OutFile) { $OutFile = Join-Path $here 'ghdl.ps1' }
 
-$md = [IO.File]::ReadAllText($SkillMd)
+if (-not (Test-Path $StepsMd)) { throw "GENERATE_MISS: 找不到步骤真源 $StepsMd" }
+$md = [IO.File]::ReadAllText($StepsMd)
 $rx = [regex]'(?ms)^[ \t]*```powershell[ \t]*\r?\n(?<code>.*?)^[ \t]*```'
 $blocks = @($rx.Matches($md) | ForEach-Object { $_.Groups['code'].Value -replace "`r`n", "`n" })
-if ($blocks.Count -lt 11) { throw "SKILL.md 只找到 $($blocks.Count) 个 powershell 块，至少要 11 个（0–10 步）" }
+if ($blocks.Count -lt 11) { throw "references/runner-steps.md 只找到 $($blocks.Count) 个 powershell 块，至少要 11 个（0–10 步）" }
 
-# 只取 0–10 步；11 起是 raw/contents 取数片段与维护自检片段，不属于 runner
+# 只取 0–10 步；第 11 块起是收尾/维护片段，不属于 runner 主体
 $flow = $blocks[0..10]
 
 # --- 三处替换（匹配不到就报错，避免 SKILL.md 改结构后静默生成坏文件）
@@ -54,8 +58,8 @@ $flow[7] = Replace-Once $flow[7] '(?m)^[ \t]*\$base[ \t]*=.*\$OutDir.*$' '$base 
 $head = @"
 <#
   ghdl.ps1 —— GitHub Release 大资产下载（一次性 runner）
-  由 scripts/build-runner.ps1 从 SKILL.md 的 0-10 步代码块自动生成，请勿手改：
-  想改逻辑就改 SKILL.md，然后重跑  powershell -NoProfile -File scripts\build-runner.ps1
+  由 scripts/build-runner.ps1 从 references/runner-steps.md 的 0-10 步代码块自动生成，请勿手改：
+  想改逻辑就改 references/runner-steps.md，然后重跑  powershell -NoProfile -File scripts\build-runner.ps1
 
   用法：
     powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://github.com/owner/repo/releases/download/v1.2.3/a.zip'
@@ -99,8 +103,8 @@ $text = $text -replace "`n", "`r`n"
 if ($Check) {
   if (-not (Test-Path $OutFile)) { "GENERATE_STALE: $OutFile 不存在"; exit 1 }
   $cur = [IO.File]::ReadAllText($OutFile)
-  if ($cur -ne $text) { "GENERATE_STALE: $OutFile 与 SKILL.md 不同步，重跑 build-runner.ps1"; exit 1 }
-  'GENERATE_OK: runner 与 SKILL.md 同步'
+  if ($cur -ne $text) { "GENERATE_STALE: $OutFile 与 references/runner-steps.md 不同步，重跑 build-runner.ps1"; exit 1 }
+  'GENERATE_OK: runner 与 references/runner-steps.md 同步'
   exit 0
 }
 

@@ -160,47 +160,58 @@ foreach ($sec in @('## Steps', '## Pitfalls', '## Verification')) {
   else { Warn "正文缺少 $sec 小节" }
 }
 
-# ---------- 4/5. powershell 代码块：语法 + 5.1 兼容性 ----------
+# ---------- 4/5. powershell 代码块：语法 + 5.1 兼容性（SKILL.md 与 references 都扫） ----------
 $fence = [regex]'(?ms)^[ \t]*```(?:powershell|pwsh|ps1)[ \t]*\r?\n(?<code>.*?)^[ \t]*```'
-$blocks = $fence.Matches($skillText)
-if ($blocks.Count -eq 0) { Warn "没有找到 ```powershell 代码块" }
+$runnerStepsPath = Join-Path $SkillRoot 'references\runner-steps.md'
+$runnerStepsText = $(if (Test-Path -LiteralPath $runnerStepsPath) { Read-Utf8 $runnerStepsPath } else { '' })
+$sources = @(
+  @{ Label = 'SKILL.md'; Text = $skillText },
+  @{ Label = 'references/runner-steps.md'; Text = $runnerStepsText }
+)
 
+$blockTotal = 0
 $totalErrors = 0
-foreach ($b in $blocks) {
-  $code  = $b.Groups['code'].Value
-  $startLine = (($skillText.Substring(0, $b.Index)) -split "`n").Count
-  $tokens = $null; $errs = $null
-  [void][System.Management.Automation.Language.Parser]::ParseInput($code, [ref]$tokens, [ref]$errs)
-  if ($errs -and $errs.Count -gt 0) {
-    $totalErrors += $errs.Count
-    foreach ($e in $errs) {
-      Bad ("代码块（SKILL.md 第 {0} 行起）语法错误：{1} @{2}" -f $startLine, $e.Message, $e.Extent.StartLineNumber)
+foreach ($src in $sources) {
+  if (-not $src.Text) { continue }
+  $blocks = $fence.Matches($src.Text)
+  $blockTotal += $blocks.Count
+  foreach ($b in $blocks) {
+    $code  = $b.Groups['code'].Value
+    $startLine = (($src.Text.Substring(0, $b.Index)) -split "`n").Count
+    $tokens = $null; $errs = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($code, [ref]$tokens, [ref]$errs)
+    if ($errs -and $errs.Count -gt 0) {
+      $totalErrors += $errs.Count
+      foreach ($e in $errs) {
+        Bad ("代码块（{0} 第 {1} 行起）语法错误：{2} @{3}" -f $src.Label, $startLine, $e.Message, $e.Extent.StartLineNumber)
+      }
     }
-  }
-  if ($code -match 'ForEach-Object\s+-Parallel' -or $code -match '-ThrottleLimit') {
-    Bad ("代码块（SKILL.md 第 {0} 行起）用了 7.x 才有的 -Parallel/-ThrottleLimit，5.1 会直接报 AmbiguousParameterSet" -f $startLine)
-  }
-  foreach ($m in [regex]::Matches($code, "'-w',\s*'(?<fmt>[^']*)'")) {
-    if ($m.Groups['fmt'].Value -match ' ') {
-      Bad ("代码块（SKILL.md 第 {0} 行起）-w 格式串含空格，5.1 的 Start-Process 会把参数拆坏" -f $startLine)
+    if ($code -match 'ForEach-Object\s+-Parallel' -or $code -match '-ThrottleLimit') {
+      Bad ("代码块（{0} 第 {1} 行起）用了 7.x 才有的 -Parallel/-ThrottleLimit，5.1 会直接报 AmbiguousParameterSet" -f $src.Label, $startLine)
     }
-  }
-  # 5.1 表达式的三种经典写坏法；先去掉行尾注释，避免注释里的示例被误判
-  foreach ($line in ($code -split "\r?\n")) {
-    if ($line.TrimStart().StartsWith('#')) { continue }
-    $c = ($line -replace '\s#.*$','').Trim()
-    if ($c -match '(?<!\$)\(\s*if\s') {
-      Bad ("代码块（SKILL.md 第 {0} 行起）用 ( if …) 包表达式：5.1 会报 The term if is not recognized，改成 `$(...) 包住 if" -f $startLine)
+    foreach ($m in [regex]::Matches($code, "'-w',\s*'(?<fmt>[^']*)'")) {
+      if ($m.Groups['fmt'].Value -match ' ') {
+        Bad ("代码块（{0} 第 {1} 行起）-w 格式串含空格，5.1 的 Start-Process 会把参数拆坏" -f $src.Label, $startLine)
+      }
     }
-    if ($c -match '\+=(?!\s*@)[^\r\n]*\|') {
-      Warn ("代码块（SKILL.md 第 {0} 行起）'+= 管道' 右边要套 @(...)，否则运算符优先级会吞掉结果" -f $startLine)
-    }
-    if ($c -match '&\s*curl[^\r\n]*2>&1') {
-      Bad ("代码块（SKILL.md 第 {0} 行起）'& curl … 2>&1'：5.1 会把 curl 的 stderr 变成终止错误，改用 Start-Process + 两个重定向文件" -f $startLine)
+    # 5.1 表达式的三种经典写坏法；先去掉行尾注释，避免注释里的示例被误判
+    foreach ($line in ($code -split "\r?\n")) {
+      if ($line.TrimStart().StartsWith('#')) { continue }
+      $c = ($line -replace '\s#.*$','').Trim()
+      if ($c -match '(?<!\$)\(\s*if\s') {
+        Bad ("代码块（{0} 第 {1} 行起）用 ( if …) 包表达式：5.1 会报 The term if is not recognized，改成 `$(...) 包住 if" -f $src.Label, $startLine)
+      }
+      if ($c -match '\+=(?!\s*@)[^\r\n]*\|') {
+        Warn ("代码块（{0} 第 {1} 行起）'+= 管道' 右边要套 @(...)，否则运算符优先级会吞掉结果" -f $src.Label, $startLine)
+      }
+      if ($c -match '&\s*curl[^\r\n]*2>&1') {
+        Bad ("代码块（{0} 第 {1} 行起）'& curl … 2>&1'：5.1 会把 curl 的 stderr 变成终止错误，改用 Start-Process + 两个重定向文件" -f $src.Label, $startLine)
+      }
     }
   }
 }
-if ($totalErrors -eq 0) { Ok "$($blocks.Count) 个 powershell 代码块全部通过语法解析" }
+if ($blockTotal -eq 0) { Warn "没有找到 ```powershell 代码块" }
+if ($totalErrors -eq 0 -and $blockTotal -gt 0) { Ok "$blockTotal 个 powershell 代码块全部通过语法解析" }
 
 # ---------- 6. agents/openai.yaml ----------
 $oaPath = Join-Path $SkillRoot 'agents\openai.yaml'
@@ -299,8 +310,8 @@ if (-not (Test-Path -LiteralPath $runnerPs1)) {
   $builder = Join-Path $SkillRoot 'scripts\build-runner.ps1'
   if (Test-Path -LiteralPath $builder) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $builder -Check | Out-Null
-    if ($LASTEXITCODE -eq 0) { Ok "ghdl.ps1 与 SKILL.md 同步（build-runner -Check）" }
-    else { Bad "ghdl.ps1 与 SKILL.md 不同步：重跑 scripts\build-runner.ps1" }
+    if ($LASTEXITCODE -eq 0) { Ok "ghdl.ps1 与 references/runner-steps.md 同步（build-runner -Check）" }
+    else { Bad "ghdl.ps1 与 references/runner-steps.md 不同步：重跑 scripts\build-runner.ps1" }
   } else { Warn "没有 scripts/build-runner.ps1，无法校验 runner 漂移" }
 }
 $runnerSh = Join-Path $SkillRoot 'scripts\ghdl.sh'
@@ -309,10 +320,11 @@ if (Test-Path -LiteralPath $runnerSh) {
   if ($shText -notmatch "`r") { Ok "ghdl.sh 是 LF 换行" } else { Bad "ghdl.sh 含 CRLF，POSIX 下会报 bad interpreter" }
   if ($shText -match 'set -[eu]') { Ok "ghdl.sh 设置了 set -e/-u" } else { Warn "ghdl.sh 建议加 set -eu" }
 
-  # 镜像清单必须两端一致：SKILL.md 的 $mirrors 是一路一份，ghdl.sh 的 for m in 是另一路。
+  # 镜像清单必须两端一致：runner 里 $mirrors 一份，ghdl.sh 的 for m in 是另一路。
   # 曾经漏掉 hk.gh-proxy.com（文档 7 条、脚本 6 条），只有真机上才发现少测了一条路线。
   # 注意：正文里有一句 `$mirrors = @()` 的初始化，必须挑「同时含 https://」的那一行才是真正的清单
-  $mirrorLine = (Read-Utf8 $skillPath) -split "`n" | Where-Object { $_ -match '\$mirrors = @\(' -and $_ -match 'https://' } | Select-Object -First 1
+  $mirrorSrc = $(if ($runnerStepsText) { $runnerStepsText } else { Read-Utf8 $skillPath })
+  $mirrorLine = $mirrorSrc -split "`n" | Where-Object { $_ -match '\$mirrors = @\(' -and $_ -match 'https://' } | Select-Object -First 1
   $shLoop = $shText -split "`n" | Where-Object { $_ -match 'for m in https://' } | Select-Object -First 1
   if ($mirrorLine -and $shLoop) {
     $docHosts = [regex]::Matches($mirrorLine, 'https://[A-Za-z0-9.\-]+') | ForEach-Object { $_.Value } | Sort-Object -Unique
@@ -335,17 +347,25 @@ if ((Test-Path -LiteralPath $testsRunner) -and (Test-Path -LiteralPath $testsSer
 } else { Warn "没有 tests\run-tests.ps1（离线回归测试缺失）" }
 
 # ---------- 9. 最小版自举 + 文档体积 + CI ----------
+# 运行时代码在 references/runner-steps.md（progressive disclosure）：SKILL.md 只留索引，
+# 否则 30KB+ 的脚本会把 65,536 字节的正文上限挤爆（宿主会直接拒收/截断技能）。
+if (Test-Path -LiteralPath $runnerStepsPath) {
+  $stepBlocks = $fence.Matches($runnerStepsText).Count
+  $sepBytes = [Text.Encoding]::UTF8.GetByteCount($runnerStepsText)
+  if ($stepBlocks -ge 11) { Ok "references/runner-steps.md 有 $stepBlocks 个 powershell 块（>= 11，build-runner 可用）" }
+  else { Bad "references/runner-steps.md 只有 $stepBlocks 个 powershell 块，build-runner 需要 >= 11" }
+  if ($runnerStepsText -match "`r") { Bad "references/runner-steps.md 含 CRLF（仓库统一 LF）" } else { Ok "references/runner-steps.md 是 LF（$sepBytes 字节）" }
+} else { Bad "缺少 references/runner-steps.md（ghdl.ps1 的真源，build-runner 依赖它）" }
+
 $skillText = Read-Utf8 $skillPath
 $skillBytes = [Text.Encoding]::UTF8.GetByteCount($skillText)
 if ($skillBytes -le 65536) {
   Ok "SKILL.md 体积 $skillBytes 字节（<= 64KB 上限）"
-  # 0–10 步的 powershell 代码块是 build-runner.ps1 生成 ghdl.ps1 的唯一真源，不能拆进 references/，
-  # 所以余量只能靠收紧文案。余量 < 2KB 时提前提醒，别等下一次改动直接 FAIL。
-  $headroom = 65536 - $skillBytes
-  if ($headroom -lt 2048) {
-    Write-Host ("[INFO] SKILL.md 仅剩 $headroom 字节余量：新增内容请放 references/，或先收紧现有文案（0–10 步代码块不可拆，build-runner 依赖它们）") -ForegroundColor Yellow
+  # 目标形态是「索引 + references」：超过 48KB 说明又往正文塞了代码/长文案，提前提醒
+  if ($skillBytes -gt 49152) {
+    Write-Host ("[WARN] SKILL.md 已 $skillBytes 字节（> 48KB）：运行时代码请放 references/runner-steps.md，正文只留步骤说明与指针") -ForegroundColor Yellow
   }
-} else { Bad "SKILL.md 已 $skillBytes 字节，超过 64KB 上限（拆到 references/）" }
+} else { Bad "SKILL.md 已 $skillBytes 字节，超过 64KB 上限（代码放 references/，正文只留指针）" }
 
 $miniSh = Join-Path $SkillRoot 'scripts\ghdl-min.sh'
 if (-not (Test-Path -LiteralPath $miniSh)) {

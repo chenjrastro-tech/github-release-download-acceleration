@@ -20,7 +20,7 @@ metadata:
 | macOS / Linux（bash 3.2+） | `bash scripts/ghdl.sh '<url>'`（参数走环境变量，见下） | 系统自带 `curl`；SHA256 用 `openssl` / `shasum` / `sha256sum` 降级链 |
 | 任意平台，只想让 agent 照做 | 读本文件 0–10 步围栏 | 无 |
 
-- Windows 版由 `scripts/build-runner.ps1` 从本文件的围栏块生成，**不要手改 `ghdl.ps1`**：改逻辑就改围栏，再重跑生成器。
+- Windows 版由 `scripts/build-runner.ps1` 从 `references/runner-steps.md` 的围栏块生成，**不要手改 `ghdl.ps1`**：改逻辑就改那个文件，再重跑生成器。
 - macOS/Linux 版 `scripts/ghdl.sh` 是手写脚本，行为对齐：选路 → 阶梯 → 分段/单流 → 自愈 → 三重校验。**macOS 真机未验证**（见 Verification 与文末支持矩阵）。
 - 两个 runner 共用同一组阈值：frontmatter `metadata` + 下面「可调参数」表 + 各自代码里的常量，三处必须一致。
 
@@ -203,6 +203,13 @@ echo "MIN_OK: $dst ($got 字节)"
 - 写脚本文件用 UTF-8 with BOM；写回 SKILL.md 用 `UTF8Encoding($false)`。
 - 不要 `& curl … 2>&1`（5.1 会把原生 stderr 变终止错误）：直调用 `2> $errF`，并行用 `-RedirectStandardOutput/-RedirectStandardError`。
 
+## 文件布局（为什么正文里没有代码）
+
+- `SKILL.md`（本文）= 索引：决策表、步骤说明、参数、Pitfalls、校验口径。**不放运行时代码**。
+- `references/runner-steps.md` = 0–10 步的 powershell 真源；`scripts/build-runner.ps1` 用它生成 `scripts/ghdl.ps1`。
+- `scripts/ghdl.ps1` / `scripts/ghdl.sh` = 两平台可直接执行的 runner；`scripts/ghdl-min.sh` = 单文件最小版（本文末尾内联同一份）。
+- 这么拆是因为宿主对 `SKILL.md` 有 65,536 字节硬上限，30KB+ 代码留在正文会被拒收。要读代码：打开 `references/runner-steps.md`，按块号对应下面的步骤。
+
 ## Steps
 
 0. **把用户给的地址拆成 `repo/tag/asset`。** 只丢一个 release 页或直链也行，不要反问。
@@ -227,517 +234,51 @@ if (-not $repo) {
 
 1. **只读自检：探清家底，不装东西、不改系统、不问用户。** 端口真在监听才算数（`ProxyEnable` 残留值不算）。多端口用并发 TcpClient 探测（实测 11 口 0.4s，串行逐口 600ms 要 6.2s）；只对最终候选口用 `Test-NetConnection` 复核一次。
 
-```powershell
-$ProgressPreference = 'SilentlyContinue'
-$onWin = ($env:OS -eq 'Windows_NT')
-$curlExe = $(if ($onWin) { 'curl.exe' } else { 'curl' })
-function Test-Port([string]$h,[int]$p,[int]$ms = 600) {
-  $c = New-Object Net.Sockets.TcpClient
-  try { $t = $c.BeginConnect($h,$p,$null,$null); if (-not $t.AsyncWaitHandle.WaitOne($ms)) { return $false }; $c.EndConnect($t); return $true }
-  catch { return $false } finally { $c.Close() }
-}
-$portList = 7890,7891,7897,7898,1080,10808,10809,2080,8889,20171,8080
-$swP = [Diagnostics.Stopwatch]::StartNew()
-$probe = @()
-foreach ($p in $portList) {
-  $c = New-Object Net.Sockets.TcpClient
-  $probe += [pscustomobject]@{ Port = $p; Client = $c; H = $c.BeginConnect('127.0.0.1', $p, $null, $null).AsyncWaitHandle }
-}
-try { [void][Threading.WaitHandle]::WaitAll([Threading.WaitHandle[]]@($probe | ForEach-Object { $_.H }), 400) } catch { }
-$listen = @($probe | Where-Object { $_.Client.Connected } | ForEach-Object { $_.Port })
-$probe | ForEach-Object { try { $_.Client.Close() } catch { } }
-$swP.Stop()
-$proxyOk = $false
-if ($listen.Count -gt 0) { $proxyOk = [bool](Test-NetConnection 127.0.0.1 -Port $listen[0] -InformationLevel Quiet -WarningAction SilentlyContinue) }
-$sysProxy = 'n/a'
-if ($onWin) {
-  $reg = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
-  $sysProxy = "ProxyEnable=$($reg.ProxyEnable) ProxyServer=$($reg.ProxyServer)"
-}
-$curlOk = [bool](Get-Command $curlExe -ErrorAction SilentlyContinue)
-$curlVer = $(if ($curlOk) { [string](((& $curlExe -V) -split '\s+')[1]) } else { '(none)' })
-"onWin=$onWin listen=$($listen -join ',') proxyOk=$proxyOk probeSec=$([math]::Round($swP.Elapsed.TotalSeconds,2)) sysProxy=$sysProxy env=$env:HTTPS_PROXY|$env:HTTP_PROXY curl=$curlVer ok=$curlOk"
-if (-not $curlOk) { throw 'NO_CURL: 端口探测/镜像/分段全部不可用；Windows 用 Invoke-WebRequest 单流降级，POSIX 直接停' }
-function Invoke-Curl([string[]]$a) {
-  $o = Join-Path $env:TEMP ("cur_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-  $p = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError "$o.err"
-  if (-not $p.WaitForExit(180000)) { $p.Kill() }
-  $out = ((Get-Content $o -Raw -ErrorAction SilentlyContinue) + '').Trim()
-  $err = ((Get-Content "$o.err" -Raw -ErrorAction SilentlyContinue) + '').Trim()
-  Remove-Item $o,"$o.err" -Force -ErrorAction SilentlyContinue
-  [pscustomobject]@{ Out = $out; Err = $err; Exit = $p.ExitCode }
-}
-```
+（运行时代码：`references/runner-steps.md` 块 0。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 2. **定位本机 Clash 内核与配置（找不到就跳过 B 路线）。** 已有代理在监听就整段跳过（实测省 5–6 秒），日志必须出现 `KERNEL_SCAN_SKIPPED`。
 
-```powershell
-$coreDir = ''; $cfgDir = ''; $cand = @()
-if ($onWin -and $listen.Count -eq 0) {
-  $base = @()
-  foreach ($d in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
-    if ($d) { $base += @((Join-Path $d 'Clash Verge'), (Join-Path $d 'Programs\Clash Verge')) }
-  }
-  foreach ($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' } | ForEach-Object { $_.Name })) {
-    $base += @((Join-Path $d 'Clash Verge'), (Join-Path $d 'Apps\Clash Verge'), (Join-Path $d 'Tools\Clash Verge'))
-  }
-  $sm = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
-  if (Test-Path $sm) {
-    $sh = New-Object -ComObject WScript.Shell
-    $base += @(Get-ChildItem $sm -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -match 'Clash.*Verge' } | ForEach-Object { Split-Path $sh.CreateShortcut($_.FullName).TargetPath -Parent })
-  }
-  $cand = @($base | Where-Object { $_ -and (Test-Path (Join-Path $_ 'verge-mihomo.exe')) } |
-    Sort-Object { (Get-Item (Join-Path $_ 'verge-mihomo.exe')).LastWriteTime } -Descending)
-  $coreDir = $cand | Select-Object -First 1
-  $cfgDir = @("$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev", "$env:APPDATA\clash-verge",
-              "$env:LOCALAPPDATA\io.github.clash-verge-rev.clash-verge-rev") |
-            Where-Object { Test-Path (Join-Path $_ 'clash-verge.yaml') } | Select-Object -First 1
-} elseif ($listen.Count -gt 0) { 'KERNEL_SCAN_SKIPPED: 已有代理在监听，跳过全盘/开始菜单扫描' }
-"core=$coreDir cfg=$cfgDir candidates=$($cand.Count)"
-```
+（运行时代码：`references/runner-steps.md` 块 1。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 3. **取 release 元数据并校验资产名（测速前的硬闸门）。只用 curl.exe，不要对这个 URL 用 `Invoke-RestMethod`。** 实测 `Invoke-RestMethod -Uri 'https://api.github.com/repos/.../releases?per_page=15'` 直接抛「基础连接已经关闭: 连接被意外关闭」，同一 cmdlet 重试无效。
 
-```powershell
-$total = [int64]0; $want = ''; $aid = [int64]0; $api = 'skip'
-$hdr = @('-H','User-Agent: dsh-agent','-H','Accept: application/vnd.github+json')
-if ($env:GITHUB_TOKEN) { $hdr += @('-H', "Authorization: Bearer $($env:GITHUB_TOKEN)") }
-if ($direct) {
-  $h = Invoke-Curl @('-sS','-L','-m','20','-A','dsh','-r','0-0','-D','-','-o','NUL',$u)
-  if ($h.Out -match '(?im)content-range:\s*bytes\s+\d+-\d+/(\d+)') { $total = [int64]$Matches[1] }
-  $api = 'direct'
-} else {
-  $metaF = Join-Path $env:TEMP ("meta_{0}.json" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-  $apiUrl = $(if ($tag) { "https://api.github.com/repos/$repo/releases/tags/$tag" } else { "https://api.github.com/repos/$repo/releases/latest" })
-  $code = (& $curlExe -sS -m 40 @hdr -o $metaF -w '%{http_code}' $apiUrl 2> "$metaF.err")
-  $body = ((Get-Content $metaF -Raw -ErrorAction SilentlyContinue) + '')
-  $apiErr = ((Get-Content "$metaF.err" -Raw -ErrorAction SilentlyContinue) + '').Trim()
-  Remove-Item $metaF,"$metaF.err" -Force -ErrorAction SilentlyContinue
-  "api=$code err=$apiErr bytes=$($body.Length)"
-  if ($code -eq '404') { throw "RELEASE_NOT_FOUND: $repo@$tag 不存在（API 404）——先确认 tag，别去猜资产名" }
-  if ($code -eq '200') {
-    $meta = $body | ConvertFrom-Json
-    $names = @($meta.assets | ForEach-Object { $_.name })
-    if ($names.Count -eq 0) { throw 'ASSET_NOT_FOUND: 该 release 没有任何 asset' }
-    if (-not $asset) { $asset = ($meta.assets | Sort-Object size -Descending | Select-Object -First 1).name }
-    $a = $meta.assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1
-    if (-not $a) {
-      $at = $asset -split '[-_.]'
-      $near = @($names | ForEach-Object { [pscustomobject]@{ Name = $_; Score = @(($_ -split '[-_.]') | Where-Object { $at -contains $_ }).Count } } | Sort-Object Score -Descending)[0].Name
-      $list = ($meta.assets | Sort-Object name | ForEach-Object { '  - {0} ({1:N1} MB)' -f $_.name, ($_.size / 1MB) }) -join "`n"
-      throw ("ASSET_NOT_FOUND: '{0}' 不在 {1}@{2}。真实候选：`n{3}`n最接近 '{4}'；确认后给完整直链，我不会静默换名。" -f $asset, $repo, $tag, $list, $near)
-    }
-    $total = [int64]$a.size; $aid = [int64]$a.id
-    $want = $(if ($a.digest -match '^sha256:([0-9a-fA-F]{64})$') { $Matches[1].ToLower() } else { '' })
-    "picked asset=$($a.name) size=$total assetId=$aid digest=$(if ($want) { 'sha256' } else { 'none' })"
-  } else {
-    if (-not $asset) { throw "ASSET_UNVERIFIED: API code=$code 且没给具体资产名，请给完整资产直链" }
-    if ($code -eq '403') { 'API_RATE_LIMITED: 可设 GITHUB_TOKEN 把限额从 60/h 提到 5000/h；本轮用已知 total/digest 继续，缺 total 用 Content-Range 反推' }
-    else { 'ASSET_UNVERIFIED: API 取不到元数据（被墙/超时），按给定资产名继续，缺 digest 只校验字节数' }
-    if ($total -le 0 -and $tag) {
-      $h = Invoke-Curl @('-sS','-L','-m','20','-A','dsh','-r','0-0','-D','-','-o','NUL',"https://github.com/$repo/releases/download/$tag/$asset")
-      if ($h.Out -match '(?im)content-range:\s*bytes\s+\d+-\d+/(\d+)') { $total = [int64]$Matches[1] }
-      "range_probe curlExit=$($h.Exit) total=$total"
-    }
-  }
-  $api = $code
-}
-"asset=$asset total=$total want=$want api=$api assetId=$aid"
-```
+（运行时代码：`references/runner-steps.md` 块 2。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 > 总字节数未知时不要猜着切段：分段需要 total 才能算每段区间。
 
 4. **并行短测各条路线：每条都真跑一次 Range GET。** 超时 8s、`--connect-timeout 5`、只取 1MB；B 路线留到第 5 步。排序先看「拿到 ≥512KB」再看 KBps——镜像回一页 HTML 错误页也会「很快」。
 
-```powershell
-if (-not $direct) { $u = "https://github.com/$repo/releases/download/$tag/$asset" }
-$mirrors = @()
-if (-not $direct) { $mirrors = @('https://ghfast.top','https://ghproxy.net','https://gh-proxy.com','https://hk.gh-proxy.com','https://github.moeyy.xyz','https://gh.llkk.cc','https://ghproxy.cc') }
-$minBytes = $(if ($direct) { 1 } else { 524288 })
-$hostName = ''; try { $hostName = ([uri]$u).Host } catch { }
-$isLocal = ($hostName -match '^(?i)(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)')
-if ($isLocal) { "LOCAL_TARGET: 目标是本机/内网地址（$hostName），跳过代理与公共镜像——它们只会把请求绕远，还可能在中途断掉；直接走原地址" }
-$probes = @()
-if (-not $isLocal -and $listen.Count -gt 0) { $probes += [pscustomobject]@{ Name = "A 代理 :$($listen[0])"; Url = $u; Proxy = "http://127.0.0.1:$($listen[0])" } }
-if (-not $isLocal) { $probes += @($mirrors | ForEach-Object { [pscustomobject]@{ Name = "C 镜像 $_"; Url = "$_/$u"; Proxy = $null } }) }
-$probes += [pscustomobject]@{ Name = 'D 直连'; Url = $u; Proxy = $null }
-$pdir = Join-Path $env:TEMP ("probe_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-New-Item -ItemType Directory $pdir -Force | Out-Null
-$jobs = @(foreach ($p in $probes) {
-  $f = Join-Path $pdir (($p.Name -replace '[^\w]','_') + '.out')
-  $a = @('-sS','-L','--connect-timeout','5','-m','8','-r','0-1048575','-A','Mozilla/5.0','-o','NUL','-w','%{http_code}|%{size_download}|%{speed_download}')
-  if ($p.Proxy) { $a += @('--proxy', $p.Proxy) } else { $a += @('--noproxy', '*') }
-  $a += $p.Url
-  [pscustomobject]@{ Name = $p.Name; Url = $p.Url; Proxy = $p.Proxy; Log = $f
-    Proc = (Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $f -RedirectStandardError ($f -replace '\.out$','.err')) }
-})
-$jobs.Proc | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
-$results = @(foreach ($j in $jobs) {
-  $o = (((Get-Content $j.Log -Raw -ErrorAction SilentlyContinue) + '').Trim()) -split '\|'
-  if ($o.Count -lt 3) { $o = @('000','0','0') }
-  [pscustomobject]@{ Name = $j.Name; Url = $j.Url; Proxy = $j.Proxy; Code = $o[0]
-    Bytes = $(if ($o[1] -match '^\d+$') { [int64]$o[1] } else { 0 })
-    KBps  = $(if ($o[2] -match '^[\d.]+$') { [int][math]::Round([double]$o[2] / 1KB, 0) } else { 0 }) }
-})
-$results | Sort-Object @{Expression = { $_.Bytes -ge 524288 }; Descending = $true}, @{Expression = 'KBps'; Descending = $true} |
-  ForEach-Object { '{0,-30} code={1} bytes={2,9} KBps={3,6}' -f $_.Name, $_.Code, $_.Bytes, $_.KBps }
-$cand2 = @($results | Where-Object { $_.Code -in @('200','206') -and $_.Bytes -ge $minBytes } | Sort-Object KBps -Descending)
-if ($cand2.Count -eq 0) {
-  throw ("NO_ROUTE: 所有路线都没拿到数据`n" + (($results | ForEach-Object { '{0} code={1} bytes={2} KBps={3}' -f $_.Name, $_.Code, $_.Bytes, $_.KBps }) -join "`n"))
-}
-$route = $cand2[0]; $winUrl = $route.Url; $winProxy = $route.Proxy
-Remove-Item $pdir -Recurse -Force -ErrorAction SilentlyContinue
-"route=$($route.Name) KBps=$($route.KBps) slow=$($route.KBps -lt 100)"
-```
+（运行时代码：`references/runner-steps.md` 块 3。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 > 实测：`proxy7897=False`（端口没监听）时 `skip proxy`，`direct -> 200`；反过来直连被打回时先 `Test-NetConnection 127.0.0.1:<port>` 再决定加不加 `--proxy`，别硬编码代理。
 
 5. **没有可用代理时才无头拉起内核，只监听 127.0.0.1:7897，并只记自己起的 pid。** 用户原本在跑的 7897 不许停；起不来就立刻杀掉自己那一个，回 C/D。顺带量一次 8MB 单连接速度（小资产跳过）。
 
-```powershell
-$corePid = $null
-$up = [bool](Test-Port '127.0.0.1' 7897)
-if ($up -and -not $isLocal) { 'PORT_7897_ALREADY_LISTENING: 用现成的，收尾不要停' }
-elseif ($up -and $isLocal) { 'LOCAL_TARGET: 现有代理对本地地址无用，本轮单流/分段都走直连' }
-elseif ($coreDir -and $cfgDir -and (Test-Path (Join-Path $coreDir 'verge-mihomo.exe'))) {
-  $core = Start-Process -FilePath (Join-Path $coreDir 'verge-mihomo.exe') -ArgumentList @('-d',$cfgDir,'-f',(Join-Path $cfgDir 'clash-verge.yaml')) -WindowStyle Hidden -PassThru
-  $corePid = $core.Id
-  for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Milliseconds 700; if (Test-Port '127.0.0.1' 7897) { break } }
-} else { 'NO_CLASH_CORE: 没找到内核/配置，跳过 B 路线' }
-$up = [bool](Test-Port '127.0.0.1' 7897)
-$bKB = 0
-if ($total -gt 0 -and $total -lt 100MB) {
-  'SINGLE_KB_SKIPPED: 资产 <100MB，跳过 8MB 单连接测速（反正走单流）'
-} elseif ($up) {
-  $need = $(if ($total -gt 0) { [math]::Min([int64]8388608, $total) } else { [int64]8388608 })
-  $br = Invoke-Curl @('-sS','-L','--connect-timeout','8','-m','20','-r','0-8388607','--proxy','http://127.0.0.1:7897','-A','Mozilla/5.0','-o','NUL','-w','%{http_code}|%{size_download}|%{speed_download}',$u)
-  $b = $br.Out -split '\|'
-  $bCode = $(if ($b.Count -ge 3) { $b[0] } else { '000' })
-  $bGot  = $(if ($b.Count -ge 3 -and $b[1] -match '^\d+$') { [int64]$b[1] } else { 0 })
-  $bKB   = $(if ($b.Count -ge 3 -and $b[2] -match '^[\d.]+$') { [int][math]::Round([double]$b[2] / 1KB, 0) } else { 0 })
-  "B 本机内核 code=$bCode got=$bGot KBps=$bKB"
-  if ($bCode -notin @('200','206') -or $bGot -lt ($need * 0.5)) {
-    "B 不可用 err=$($br.Err)"
-    if ($corePid) { Stop-Process -Id $corePid -Force -ErrorAction SilentlyContinue; $corePid = $null }
-    $bKB = 0
-  }
-}
-if ($bKB -ge 100 -and $bKB -gt $route.KBps) { $winUrl = $u; $winProxy = 'http://127.0.0.1:7897'; 'B 胜出，改用本机内核' }
-$singleKB = [int]$bKB
-if ($singleKB -le 0) { $singleKB = [int]$route.KBps }
-"singleKB=$singleKB (>=3072 视为单连接没被限速)"
-```
+（运行时代码：`references/runner-steps.md` 块 4。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 6. **先判值不值得测，再做限时阶梯。** 默认只在「资产 ≥100 MB 且 `$singleKB < 3072`」时跑 **1/16 两档**；用户要对照才置 `$ForceLadder = $true` 跑 1、4、16。每档 n 条连接各从自己起点 open-range 读到文件尾，同一时间窗比聚合吞吐，三遍交错取中位数并报 min–max。
 
-```powershell
-function Test-Ladder([int]$n,[string]$url,[string]$proxy,[int64]$total = 0,[int]$sec = 4) {
-  $per = $(if ($total -gt 0) { [int64][math]::Floor($total / $n) } else { [int64][math]::Floor(64MB / $n) })
-  $dir = Join-Path $env:TEMP ("ladder_{0}_{1}" -f $n, [guid]::NewGuid().ToString('N').Substring(0,4))
-  New-Item -ItemType Directory $dir -Force | Out-Null
-  $sw = [Diagnostics.Stopwatch]::StartNew()
-  $ps = @(1..$n | ForEach-Object {
-    $i = $_; $s = [int64](($i - 1) * $per)
-    $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$s-",'-o','NUL','-m',"$sec",'-w','%{http_code}|%{size_download}|%{speed_download}')
-    if ($proxy) { $a += @('--proxy',$proxy) } else { $a += @('--noproxy','*') }
-    $a += $url
-    Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $dir "p$i.out") -RedirectStandardError (Join-Path $dir "p$i.err")
-  })
-  $ps | Wait-Process -Timeout ($sec + 30) -ErrorAction SilentlyContinue
-  $ps | Where-Object { -not $_.HasExited } | Stop-Process -Force -ErrorAction SilentlyContinue
-  $sw.Stop(); $bytes = 0; $ok = 0
-  Get-ChildItem $dir -Filter 'p*.out' -ErrorAction SilentlyContinue | ForEach-Object {
-    $o = (((Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) + '').Trim()) -split '\|'
-    if ($o.Count -ge 3 -and $o[0] -match '^20[06]$') { $ok++; if ($o[1] -match '^\d+$') { $bytes += [int64]$o[1] } }
-  }
-  $kbps = [int](($bytes / 1KB) / [math]::Max($sw.Elapsed.TotalSeconds, 0.1))
-  Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-  [pscustomobject]@{ N = $n; Full = $ok; KBps = $kbps
-    Text = ('{0,2} 段: 完成 {1}/{0} {2,7:N1} MB / {3,4:N1}s = {4,6:N0} KB/s' -f $n, $ok, ($bytes / 1MB), $sw.Elapsed.TotalSeconds, $kbps) }
-}
-$ForceLadder = $false
-$ladderMinMB = 100
-$fastKB = 3072
-$bigEnough = ($total -ge ($ladderMinMB * 1MB))
-$throttled = ($singleKB -le 0) -or ($singleKB -lt $fastKB)
-$rungs = $(if ($ForceLadder) { @(1,4,16) } else { @(1,16) })
-$runs = @()
-if ($ForceLadder -or ($bigEnough -and $throttled)) {
-  foreach ($rep in 1..3) { foreach ($n in $rungs) { $runs += @(Test-Ladder $n $winUrl $winProxy $total 4) } }
-} else {
-  "SKIP_LADDER: total=$([math]::Round($total/1MB,1))MB singleKB=$singleKB（门槛 ${ladderMinMB}MB/${fastKB}KB/s）-> 单流，省约 20-26s"
-}
-$winN = 1; $ratio = 1
-if ($runs.Count -gt 0) {
-  $agg = @(foreach ($n in $rungs) {
-    $s = @($runs | Where-Object { $_.N -eq $n }); if ($s.Count -eq 0) { continue }
-    $v = @($s | ForEach-Object { [int]$_.KBps } | Sort-Object); $mid = [int][math]::Floor($v.Count / 2)
-    $med = $(if (($v.Count % 2) -eq 1) { $v[$mid] } else { [int](($v[$mid - 1] + $v[$mid]) / 2) })
-    [pscustomobject]@{ N = $n; Full = ($s | Measure-Object Full -Minimum).Minimum; Med = $med; Min = $v[0]; Max = $v[$v.Count - 1] }
-  })
-  $agg | ForEach-Object { '{0,2} 段: 完成 {1}/{0} 中位 {2,6} KB/s min-max {3}-{4}' -f $_.N, $_.Full, $_.Med, $_.Min, $_.Max }
-  $one = $agg | Where-Object { $_.N -eq 1 } | Select-Object -First 1
-  $best = @($agg | Where-Object { $_.Full -ge $_.N -and $_.N -gt 1 } | Sort-Object Med -Descending)[0]
-  if ($best -and (-not $one -or $best.Med -ge (1.25 * $one.Med))) { $winN = $best.N; $ratio = [math]::Round($best.Med / [math]::Max($one.Med, 1), 2) }
-  "LADDER_DONE: rungs=$($rungs -join '/') passes=3 winN=$winN ratio=${ratio}x"
-}
-if ($Parts -gt 0) {
-  if ($total -gt 0) { $winN = [int]$Parts }   # -Parts 的含义是「段数」，第 7 步据此切分并回显 PARTS_OVERRIDE
-  else { "PARTS_IGNORED: 总字节数未知（API 限流或不可达），无法切 range，改走单流"; $winN = 1 }
-}
-```
+（运行时代码：`references/runner-steps.md` 块 5。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 判定：只有「完成数 = n/n」的档位能胜出；多段必须快过单段 1.25 倍才分段，否则 `$winN=1` 并把倍数写进报告。`$total` 未知时按 64MB 估起点。
 
 7. **按胜出组合下载。** 单流优先用 **asset id URL + `Accept: application/octet-stream`**（避免 302 到过期签名链）；分段仍用 `browser_download_url`（range 实测稳定）。分段时**起始并发 = `$winN`**、按队列波次推进，每 500ms 轮询 `.part` 增长，单段 6 秒无增长就杀那一条 curl、只把该段塞回队列。
 
-```powershell
-$ErrorActionPreference = 'Stop'
-$vc = $(if ($curlVer -match '^(\d+)\.(\d+)') { [version]"$($Matches[1]).$($Matches[2])" } else { [version]'0.0' })
-$retry = @('--retry','3','--retry-delay','2')
-if ($vc -ge [version]'7.71') { $retry += '--retry-all-errors' } else { "RETRY_DEGRADED: curl $curlVer < 7.71，只用 --retry 3 --retry-delay 2" }
-$base = $(if ($OutDir) { $OutDir } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads' })
-$dir = Join-Path $base '_dl_parts'
-$out = Join-Path $base $asset
-New-Item -ItemType Directory $base -Force | Out-Null
-if ($dir -match ' ') { throw "SPACE_IN_PATH: $dir 含空格，5.1 的 Start-Process 会拆坏 -o" }
-$assetUrl = $(if ($aid -gt 0) { "https://api.github.com/repos/$repo/releases/assets/$aid" } else { $winUrl })
-
-# 孤儿收尾：上次被强杀留下的 curl 可能还在写同一目录（只认本目录）
-if ($onWin) {
-  @(Get-CimInstance Win32_Process -Filter "Name='curl.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($dir) } | ForEach-Object { [int]$_.ProcessId }) |
-    ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-}
-# 幂等：目标已存在且字节/哈希都对 → 直接跳过
-$verifiedBefore = $false
-if ((Test-Path $out) -and -not $ForceClean) {
-  $osz = (Get-Item $out).Length
-  if ($total -gt 0 -and $osz -eq $total) {
-    $verifiedBefore = $(if ($want) { (Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash.ToLower() -eq $want } else { $true })
-  }
-  if ($verifiedBefore) { "ALREADY_DONE: $out 已是完整文件（$osz 字节），跳过下载" }
-}
-if ($ForceClean) {
-  Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Item $out -Force -ErrorAction SilentlyContinue
-  'FORCE_CLEAN: 已删旧分片与旧输出，强制重下'
-}
-$engine = 'single'; $nseg = 1; $chunk = [int64]0; $repairs = 0; $stalls = 0; $swE = $null
-if ($verifiedBefore) { $engine = 'cached' }
-elseif ($total -le 0 -or $total -lt ($ladderMinMB * 1MB) -or $winN -le 1) {
-  $singleResume = @()
-  if ((Test-Path $out) -and $total -gt 0 -and (Get-Item $out).Length -lt $total) {
-    $singleResume = @('-C','-'); "SINGLE_RESUME: 从 $((Get-Item $out).Length) 字节继续"
-  }
-  $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-H','Accept: application/octet-stream','-o',$out,'-D',"$out.headers",'-m','1800','-w','code=%{http_code}|got=%{size_download}|speed=%{speed_download}') + $singleResume + $retry
-  if ($winProxy) { $a += @('--proxy', $winProxy) } else { $a += @('--noproxy', '*') }
-  $a += $assetUrl
-  $st = (& $curlExe @a 2> "$out.err" | Out-String).Trim()
-  "SINGLE exit=$LASTEXITCODE $st"
-  if ($LASTEXITCODE -ne 0) { throw "SINGLE_FAILED: exit=$LASTEXITCODE $st $((Get-Content "$out.err" -Raw -ErrorAction SilentlyContinue))" }
-  Remove-Item "$out.err" -Force -ErrorAction SilentlyContinue
-  # -D 会把重定向链每一跳的响应头都写进来，302 那跳是 Content-Length: 0，必须取最后一个
-  if (-not $singleResume -and (Test-Path "$out.headers")) {
-    $cls = [regex]::Matches([IO.File]::ReadAllText("$out.headers"), '(?im)^content-length:\s*(\d+)\s*$')
-    if ($cls.Count -gt 0 -and $total -gt 0) {
-      $declared = [int64]$cls[$cls.Count - 1].Groups[1].Value
-      if ($declared -gt 0 -and $declared -ne $total) { throw "SIZE_MISMATCH: Content-Length=$declared 与 total=$total 不一致（下载被截断或换过文件），文件留在 $out" }
-      "content_length_ok=$declared（取重定向链最后一个）"
-    }
-  }
-  Remove-Item "$out.headers" -Force -ErrorAction SilentlyContinue
-  if ($total -le 0) { $total = (Get-Item $out).Length; "total_from_download=$total" }
-} else {
-  $root = ([IO.Path]::GetPathRoot($dir)).TrimEnd('\').TrimEnd(':')
-  $freeGB = [math]::Round((Get-PSDrive $root).Free / 1GB, 1); $needGB = [math]::Round(($total * 2 / 1GB), 1)
-  if ($freeGB -lt $needGB) { throw "SPACE_LOW: free=${freeGB}GB need=${needGB}GB" }
-  $poolAll = @($results | Where-Object { $_.Code -eq '206' -and $_.Bytes -ge 1048576 } | Sort-Object KBps -Descending)
-  $pool = $(if ($poolAll.Count -gt 0) { @($poolAll | Select-Object -First 3) } else { @($route) })
-  $pool = @($pool)
-  if ($pool.Count -eq 0) { throw "POOL_EMPTY: 没有可用路线（route=$($route.Name) code=$($route.Code)），先看第 4 步的 route 表" }
-  $poolN = [math]::Max(1, $pool.Count)
-  $perKB = [math]::Max([int]$singleKB, 512)
-  $chunk = [int64]($perKB * 1024 * 4)                    # 每段约 4 秒的活
-  if ($chunk -lt 2MB) { $chunk = 2MB } elseif ($chunk -gt 24MB) { $chunk = 24MB }
-  $nseg = [int][math]::Ceiling($total / [double]$chunk)
-  if ($nseg -gt 128) { $nseg = 128 }
-  $chunk = [int64][math]::Ceiling($total / [double]$nseg)
-  $workers = [math]::Min([math]::Max([int]$winN, 2), 16)
-  if ($Parts -gt 0) {
-    # -Parts 是「段数」：显式切分，别让「每段 4 秒的活」把段数压回个位数（诊断/复现场景要可复现）
-    $nseg = [math]::Min([int]$Parts, 128)
-    $chunk = [int64][math]::Ceiling($total / [double]$nseg)
-    $workers = [math]::Min([math]::Max([int]$Parts, 2), 16)
-    "PARTS_OVERRIDE: nseg=$nseg chunk=$([math]::Round($chunk/1MB,1))MB workers=$workers（手动指定段数）"
-  }
-  $manifest = Join-Path $dir 'manifest.json'; $resumePlan = $false
-  if ((Test-Path $manifest) -and -not $ForceClean) {
-    try {
-      $mf = Get-Content $manifest -Raw | ConvertFrom-Json
-      if ([int64]$mf.total -eq $total -and $mf.url -eq $winUrl) {
-        $chunk = [int64]$mf.chunk; $nseg = [int]$mf.nseg; $resumePlan = $true
-        $had = @(Get-ChildItem $dir -Filter 'p*.bin' -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-        "RESUME_PLAN: 沿用 nseg=$nseg chunk=$([math]::Round($chunk/1MB,1))MB 已有 $([math]::Round($had/1MB,1))MB"
-      }
-    } catch { 'RESUME_PLAN_IGNORED: manifest 读不懂，重新规划' }
-  }
-  if (-not $resumePlan) {
-    Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory $dir -Force | Out-Null
-    @{ total = $total; chunk = $chunk; nseg = $nseg; url = $winUrl; asset = $asset } | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifest -Encoding ASCII
-  }
-  $poolNames = ($pool | ForEach-Object { $_.Name }) -join '+'
-  "PLAN: nseg=$nseg chunk=$([math]::Round($chunk/1MB,1))MB workers=$workers pool=$poolNames"
-  $segFile = { param($i) Join-Path $dir ("p{0:000}.bin" -f $i) }
-  $queue = New-Object System.Collections.ArrayList
-  for ($i = 0; $i -lt $nseg; $i++) {
-    $s = [int64]($i * $chunk); $e = $(if ($i -eq $nseg - 1) { $total - 1 } else { $s + $chunk - 1 })
-    $f = & $segFile $i
-    $have = $(if (Test-Path $f) { [int64](Get-Item $f).Length } else { [int64]0 })
-    if ($have -lt ($e - $s + 1)) { [void]$queue.Add([pscustomobject]@{ Index = $i; Start = $s; End = $e; Route = ($i % $poolN); Tries = 0 }) }
-  }
-  $running = @{}; $jid = 0; $swE = [Diagnostics.Stopwatch]::StartNew()
-  $tick = 0; $lastDone = [int64]0; $lastT = 0.0
-  while ($queue.Count -gt 0 -or $running.Count -gt 0) {
-    while ($running.Count -lt $workers -and $queue.Count -gt 0) {
-      $seg = $queue[0]; $queue.RemoveAt(0); $jid++
-      $f = & $segFile $seg.Index
-      $have = $(if (Test-Path $f) { [int64](Get-Item $f).Length } else { [int64]0 })
-      $rs = [int64]($seg.Start + $have)
-      if ($rs -gt $seg.End) { continue }
-      $tgt = $(if ($have -eq 0) { $f } else { "$f.resume" })     # 续写只写 .resume，完成后合并
-      $rt = $pool[$seg.Route % $poolN]
-      $a = @('-sS','-L','--fail','--connect-timeout','10','-A','Mozilla/5.0','-r',"$rs-$($seg.End)",'-o',$tgt,'-m','1800') + $retry
-      if ($rt.Proxy) { $a += @('--proxy', $rt.Proxy) } else { $a += @('--noproxy', '*') }
-      $a += $rt.Url
-      $lg = Join-Path $dir ("p{0:000}.log" -f $seg.Index)
-      $pr = Start-Process $curlExe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $lg -RedirectStandardError ($lg -replace '\.log$', '.err')
-      $running[$jid] = [pscustomobject]@{ Seg = $seg; File = $f; Resume = $(if ($tgt -eq $f) { $null } else { $tgt }); Proc = $pr; Last = $have; Still = 0 }
-    }
-    Start-Sleep -Milliseconds 500
-    $tick++
-    if ($tick % 6 -eq 0) {
-      $done = [int64]0
-      Get-ChildItem $dir -Filter 'p*.bin' -ErrorAction SilentlyContinue | ForEach-Object { $done += $_.Length }
-      $now = $swE.Elapsed.TotalSeconds; $kbps = 0
-      if ($now -gt $lastT) { $kbps = [math]::Round((($done - $lastDone) / 1024) / ($now - $lastT)) }
-      $lastDone = $done; $lastT = $now
-      "progress=$([math]::Round($done/1MB,1))MB/$([math]::Round($total/1MB,1))MB ($([math]::Round(100.0*$done/$total))%) running=$($running.Count) rate=${kbps}KB/s"
-    }
-    foreach ($k in @($running.Keys)) {
-      $job = $running[$k]; $stalled = $false
-      if (-not $job.Proc.HasExited) {
-        $cur = $(if (Test-Path $job.File) { [int64](Get-Item $job.File).Length } else { [int64]0 }) + $(if ($job.Resume -and (Test-Path $job.Resume)) { [int64](Get-Item $job.Resume).Length } else { [int64]0 })
-        if ($cur -le $job.Last) { $job.Still++ } else { $job.Still = 0 }
-        $job.Last = $cur
-        if ($job.Still -lt 12) { continue }        # 6 秒没长进才算卡住（4 秒会误杀慢启动的连接）
-        Stop-Process -Id $job.Proc.Id -Force -ErrorAction SilentlyContinue
-        Wait-Process -Id $job.Proc.Id -Timeout 5 -ErrorAction SilentlyContinue
-        $stalled = $true
-      }
-      if ($job.Resume -and (Test-Path $job.Resume)) {
-        $tries = 0
-        while ($tries -lt 10) {
-          try {
-            $fs = [IO.File]::Open($job.File, [IO.FileMode]::Append, [IO.FileAccess]::Write)
-            $ri = [IO.File]::OpenRead($job.Resume); $ri.CopyTo($fs); $ri.Dispose(); $fs.Dispose(); break
-          } catch { Start-Sleep -Milliseconds 300; $tries++; if ($tries -ge 10) { throw "RESUME_MERGE_FAILED: $($job.Resume) 一直被占用" } }
-        }
-        Remove-Item $job.Resume -Force -ErrorAction SilentlyContinue
-      }
-      $running.Remove($k)
-      if ($stalled) { $stalls++ }
-      $have = $(if (Test-Path $job.File) { [int64](Get-Item $job.File).Length } else { [int64]0 })
-      $need = $job.Seg.End - $job.Seg.Start + 1
-      if ($have -lt $need) {                     # 0 字节/短缺：只补这一段，不整包重来
-        $repairs++
-        if ($job.Seg.Tries -ge 5) { throw "SEGMENT_SHORT: p$($job.Seg.Index) have=$have need=$need（换 5 条路线仍不够）" }
-        $job.Seg.Tries++; $job.Seg.Route++; [void]$queue.Add($job.Seg)
-      }
-    }
-  }
-  $swE.Stop(); $engine = 'segments'
-  "engine_done=segments nseg=$nseg stalls=$stalls repairs=$repairs elapsed=$([math]::Round($swE.Elapsed.TotalSeconds,1))s"
-}
-```
+（运行时代码：`references/runner-steps.md` 块 6。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 > 实测：8 段并行跑到 87.5% 时 `02.part` 长时间 0 字节、其余 7 段早已打满，整体停滞；此时**不要从头来**——停掉该段进程、只对 `02` 那一段再发一次 `-r <start>-<end>`（实测 5,684,160 字节、246 KB/s），再进入拼装。
 
 8. **拼装前逐段强校验，再按 p000→pN 拼。** 每段长度必须精确等于 `end-start+1`；缺段或多出字节都报 `SEGMENT_SIZE_MISMATCH` 并列出段号/期望/实际。
 
-```powershell
-if ($engine -eq 'segments' -and $nseg -gt 1) {
-  $errs = @(); $sum = 0
-  for ($i = 0; $i -lt $nseg; $i++) {
-    $s = [int64]($i * $chunk)
-    $e = $(if ($i -eq $nseg - 1) { $total - 1 } else { $s + $chunk - 1 })
-    $need = $e - $s + 1
-    $p = Join-Path $dir ("p{0:000}.bin" -f $i)
-    if (-not (Test-Path $p)) { $errs += "p$i 缺失(期望 $need)"; continue }
-    $len = (Get-Item $p).Length
-    if ($len -ne $need) { $errs += ("p{0} 期望 {1} 实际 {2}" -f $i, $need, $len); continue }
-    $sum += $len
-  }
-  if ($errs.Count -gt 0) { throw ("SEGMENT_SIZE_MISMATCH: " + ($errs -join '; ') + "（分片留在 $dir，重跑会续传）") }
-  if ($sum -ne $total) { throw "PARTS_MISMATCH: sum=$sum total=$total（分片留在 $dir）" }
-  "partsBytes=$sum total=$total ok=True"
-  $fs = [IO.File]::Create($out)
-  for ($i = 0; $i -lt $nseg; $i++) { $ri = [IO.File]::OpenRead((Join-Path $dir ("p{0:000}.bin" -f $i))); $ri.CopyTo($fs); $ri.Dispose() }
-  $fs.Dispose()
-  "assembled=$((Get-Item $out).Length)"
-} else { "single=$((Get-Item $out).Length)（单流/命中缓存，无需拼装）" }
-```
+（运行时代码：`references/runner-steps.md` 块 7。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 9. **用 asset digest 做「字节数 + SHA256」闭环，再跑一次冒烟。** 无 digest 的老 release 如实报缺基准，不伪造校验，也不用 Authenticode 兜底（实测该安装包 `NotSigned`）。
 
-```powershell
-$size = (Get-Item $out).Length
-$sizeOk = $(if ($total -gt 0) { $size -eq $total } else { $size -gt 0 })
-$verifiedOk = $false
-"size=$size expect=$(if ($total -gt 0) { "$total" } else { 'unknown（只能证明下完了，不能证明和远端一致）' }) sizeOk=$sizeOk"
-if ($want) {
-  $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash.ToLower()
-  "sha256=$got"
-  "digest=sha256:$want"
-  if ($sizeOk -and $got -eq $want) { $verifiedOk = $true; 'DOWNLOAD_VERIFIED_OK' } else { 'DOWNLOAD_VERIFY_FAILED' }
-} else {
-  'NO_DIGEST: 该 release 未提供 sha256，只能保证字节数一致'
-  if ($sizeOk) { $verifiedOk = $true; 'DOWNLOAD_SIZE_OK_NO_DIGEST' } else { 'DOWNLOAD_VERIFY_FAILED' }
-}
-# 冒烟："文件在" ≠ "文件能用"；原生 stderr 一律 *> 文件，不要 2>&1
-$smoke = 'SKIP'
-if ($verifiedOk -and $asset -match '\.exe$') {
-  $verF = Join-Path $env:TEMP ("ver_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-  $null = & $out --version *> $verF
-  $smoke = ((((Get-Content $verF -Raw -ErrorAction SilentlyContinue) + '').Trim()) -split "`n")[0].Trim()
-  Remove-Item $verF -Force -ErrorAction SilentlyContinue
-} elseif ($verifiedOk -and $asset -match '\.zip$') {
-  $tmp = Join-Path $env:TEMP ("smoke_{0}" -f [guid]::NewGuid().ToString('N').Substring(0,6))
-  try { Expand-Archive -LiteralPath $out -DestinationPath $tmp -Force; $smoke = "unzip_ok files=$(@(Get-ChildItem $tmp -Recurse -File).Count)" }
-  catch { $smoke = "SMOKE_FAILED: $($_.Exception.Message)" }
-  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-} elseif ($verifiedOk -and $asset -match '\.(tar\.gz|tgz)$') {
-  try { & tar.exe -tf $out | Out-Null; $smoke = 'tar_list_ok' } catch { $smoke = "SMOKE_FAILED: $($_.Exception.Message)" }
-}
-"smoke=$smoke"
-$elapsedSec = $(if ($swE) { [math]::Round($swE.Elapsed.TotalSeconds, 1) } else { 0 })
-$avgMBs = $(if ($elapsedSec -gt 0) { [math]::Round(($size / 1MB) / $elapsedSec, 2) } else { 0 })
-```
+（运行时代码：`references/runner-steps.md` 块 8。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 10. **收尾只还原自己动过的东西。** 只按 `$corePid`/`$pids` 以 Id 停进程；别 `Stop-Process -Name curl`（会杀用户自己的下载），别关用户原本在跑的代理。
 
-```powershell
-if ($corePid) { Stop-Process -Id $corePid -ErrorAction SilentlyContinue }
-if ($verifiedOk -and -not $KeepParts) { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
-elseif (Test-Path $dir) { "PARTS_KEPT: 分片保留在 $dir（校验未通过或 -KeepParts；重跑会续传，-ForceClean 可清掉重下）" }
-Get-ChildItem $env:TEMP -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -like 'ladder_*' -or $_.Name -like 'probe_*' -or $_.Name -like 'meta_*' -or $_.Name -like 'cur_*' -or $_.Name -like 'raw_*' -or $_.Name -like 'ver_*' -or $_.Name -like 'smoke_*' } |
-  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-"7897=$([bool](Test-Port '127.0.0.1' 7897)) corePid=$corePid"
-if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyEnable }
-```
+（运行时代码：`references/runner-steps.md` 块 9。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 ### 报告模板（小白只看这四行）
 
@@ -803,7 +344,7 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 - **小文件不能用 256KB 当探针门槛**（直链常是小文本，会误判 `NO_ROUTE`）；已知 total 降到 total，未知直链降到 1KB。
 - **报告写实测平均速度，不要写峰值**；收益必须同时给时间降幅与速度升幅，并说明两者不等价。
 - **写技能自己的 .ps1 必须带 BOM**（`UTF8Encoding($true)`）；写回 SKILL.md 相反用 `UTF8Encoding($false)`。`Get-ChildItem -Filter` 只接受单个字符串，多模式用 `Where-Object Name -like`。
-- **SKILL.md 体积有硬上限 65536 字节**（宿主会截断超大 SKILL.md）：本轮就因超限被拒过一次。改完必须 `(Get-Item SKILL.md).Length` 自检，超了先删重复段落（同一事实只写一次），别删校验步骤。
+- **SKILL.md 体积有硬上限 65536 字节**（宿主超限会截断/拒收）：运行时代码已外置到 `references/runner-steps.md`，正文只留步骤说明与指针。改完必须 `(Get-Item SKILL.md).Length` 自检；再加长先拆 `references/`，别删校验步骤。
 - **续传 manifest 必须先校验 `total` 与 `url`**；`.resume` 合并前要 `Wait-Process` 再 10×300ms 重试（实测直接 `OpenRead` 撞「文件被另一进程占用」）。
 - **收尾清理只删自己建的东西**：别用 `-like 'ghdl_*'` 扫 `%TEMP%`（实测删掉别人的 `%TEMP%\ghdl_tests`，表现为「下载成功但文件不见了」）。
 - **本机假服务器是单线程的**：`tests/serve.ps1` 串行处理连接，探针会全 `000` → `NO_ROUTE`；这是夹具限制。
@@ -845,17 +386,9 @@ if ($onWin) { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion
 
 ## 维护与自检（改完必跑）
 
-三个非模型文件随文档同步：`agents/openai.yaml`（`short_description` 25–64 字符、含 `$github-release-download-acceleration`）、`README.md`（与本文一致）、`scripts/validate.ps1`（退出码非 0 就是文档有问题）。改第 0–9 步代码后 `scripts/ghdl.ps1` 由 `scripts/build-runner.ps1` 重新生成；`tests/` 是离线回归套件。
+三个非模型文件随文档同步：`agents/openai.yaml`（`short_description` 25–64 字符、含 `$github-release-download-acceleration`）、`README.md`（与本文一致）、`scripts/validate.ps1`（退出码非 0 就是文档有问题）。改 `references/runner-steps.md` 后 `scripts/ghdl.ps1` 由 `scripts/build-runner.ps1` 重新生成；`tests/` 是离线回归套件。
 
-```powershell
-$root = '<技能目录>'
-powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\validate.ps1'); "exit=$LASTEXITCODE"
-"SKILL_MD_bytes=" + (Get-Item (Join-Path $root 'SKILL.md')).Length        # 必须 ≤ 65536
-"SKILL_MD_BOM=" + ([IO.File]::ReadAllBytes((Join-Path $root 'SKILL.md'))[0] -eq 0xEF)   # 必须 False
-$t = [IO.File]::ReadAllText((Join-Path $root 'SKILL.md'), [Text.Encoding]::UTF8)
-$code = ([regex]::Matches($t, '(?ms)^[ \t]*```(?:powershell|pwsh|ps1)[ \t]*\r?\n(?<code>.*?)^[ \t]*```') | ForEach-Object { $_.Groups['code'].Value }) -join "`n"
-"hardcoded_core_path_hits=" + ([regex]::Matches($code, 'D:\\Clash Verge')).Count                     # 必须 0
-```
+（运行时代码：`references/runner-steps.md` 块 10。要执行直接用 `scripts\ghdl.ps1`，不必手工复制这段脚本。）
 
 - **门槛可配且只改一处会被拦住**：frontmatter `metadata.min_size_for_ladder_mb` = 100 / `single_conn_fast_kbps` = 3072，与正文参数表、代码 `$ladderMinMB = 100` / `$fastKB = 3072` 三处一致；只改一处时 `validate.ps1` 输出「不一致：改阈值要两处同步」并 `exit=1`，一致时 `VALIDATE_OK` + `exit=0`。
 - **离线回归**：`powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1` 必须 `TESTS_OK`；网络全断时用离线夹具，夹具 PASS 只能报成离线验证。

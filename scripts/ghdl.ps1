@@ -1,7 +1,7 @@
 ﻿<#
   ghdl.ps1 —— GitHub Release 大资产下载（一次性 runner）
-  由 scripts/build-runner.ps1 从 SKILL.md 的 0-10 步代码块自动生成，请勿手改：
-  想改逻辑就改 SKILL.md，然后重跑  powershell -NoProfile -File scripts\build-runner.ps1
+  由 scripts/build-runner.ps1 从 references/runner-steps.md 的 0-10 步代码块自动生成，请勿手改：
+  想改逻辑就改 references/runner-steps.md，然后重跑  powershell -NoProfile -File scripts\build-runner.ps1
 
   用法：
     powershell -NoProfile -File scripts\ghdl.ps1 -Url 'https://github.com/owner/repo/releases/download/v1.2.3/a.zip'

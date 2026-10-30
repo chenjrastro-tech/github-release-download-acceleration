@@ -33,7 +33,10 @@ GitHub Release 的大资产（几十到几百 MB 的安装包、便携包）在�
 
 ```
 github-release-download-acceleration/
-├── SKILL.md              # 技能正文：决策表 + 错误路径 + 12 步流程（0–11） + 维护说明 + Pitfalls
+├── SKILL.md              # 技能正文（索引）：决策表 + 错误路径 + 步骤说明 + 参数 + Pitfalls
+├── references/
+│   ├── runner-steps.md   # 0–10 步 powershell 真源（build-runner 用它生成 ghdl.ps1）
+│   └── fetch-raw-via-api.md  # raw 文件改走 contents API 的具体命令
 ├── README.md             # 本文件
 ├── LICENSE               # MIT 许可证
 ├── package.json          # 插件清单：声明 dsh.bundle.patch（市场只收带 dsh.bundle 的包）
@@ -42,6 +45,10 @@ github-release-download-acceleration/
 ├── agents/
 │   └── openai.yaml       # Codex/OpenAI 宿主的展示元数据（DSH 不读这个文件）
 ├── scripts/
+│   ├── build-runner.ps1  # 生成器：references/runner-steps.md -> ghdl.ps1
+│   ├── ghdl.ps1          # Windows runner（生成物，勿手改）
+│   ├── ghdl.sh           # macOS/Linux runner
+│   ├── ghdl-min.sh       # 单文件最小版（正文内联同一份）
 │   └── validate.ps1      # 自检脚本：结构 / frontmatter / 5.1 兼容性 / 代码块语法
 ├── assets/               # 市场卡片图标与实测截图
 └── screenshots.json      # 声明 1-8 张截图（市场详情页读取，放 package.json 旁边）
@@ -156,7 +163,7 @@ sh scripts/ghdl.sh --help                                  # 全部选项
 只有 `SKILL.md`、没有 `scripts/`（raw 又被墙）时，用 **最小版**：`SKILL.md` 里「拿不到 scripts/ 时的最小版」一节内联了完整脚本（86 行、只依赖 curl、会分段+续传+校验），
 也单独放在 `scripts/ghdl-min.sh`；`validate.ps1` 会逐字比对两处，改一边不改另一边直接 FAIL。
 
-`scripts/ghdl.ps1` 不是手写的：`scripts/build-runner.ps1` 把 `SKILL.md` 第 0–11 步的代码块拼成它（只替换 URL/输出目录/强制阶梯三处），`validate.ps1` 会比对两者，改了文档不重生成就 FAIL。
+`scripts/ghdl.ps1` 不是手写的：`scripts/build-runner.ps1` 把 `references/runner-steps.md` 的 11 个代码块拼成它（只替换 URL/输出目录/强制阶梯三处），`validate.ps1` 会比对两者，改了文档不重生成就 FAIL。
 
 ### 并发引擎（P2）：自适应段 + 多源 + 工作窃取
 
@@ -363,6 +370,13 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 ## 变更记录
 
+### 0.3.4（2026-10-30）
+
+- **`SKILL.md` 拆分，正文 65,383 → 35,246 字节（-46%）**：0–10 步的 11 个 `powershell` 代码块移到 `references/runner-steps.md`，正文只留步骤说明与指针。起因是宿主侧 65,536 字节硬上限——超限时改进器直接报 `SKILL.md is too large (max 65536 bytes)`，技能自身也可能被拒收。
+- `scripts/build-runner.ps1` 改为从 `references/runner-steps.md` 取块（新参数 `-StepsMd`，默认指向该文件）；`scripts/ghdl.ps1` 重新生成后除文件头两行说明外逐字节不变。
+- `validate.ps1`：新增 `references/runner-steps.md` 存在性 / ≥11 个 powershell 块 / LF 检查；代码块静态检查改为「SKILL.md + references 都扫」；镜像清单一致性改从 runner 真源读；体积判定从「64 KiB 上限 + 余量 <2 KB 提醒」改为「>48 KB 提示继续拆分」。
+- README 目录树、生成器说明、限制段同步更新。
+
 ### 0.3.3（2026-10-30）
 
 - **直链大小探测改成按状态码判断**（`scripts/ghdl.sh` L204 起）：只信 `206`/`200` 的 `Content-Range`/`Content-Length`；`403` 立刻 `HTTP_403` 干净失败并给原因，`404` 说明是 tag/文件名写错或被 302 到登录页，`408/425/429/5xx` 打 `PROBE_RETRY` 退避重试 3 次。此前只抓「最后一个 `Content-Length`」，503 响应体 `retry later` 那 11 字节会被当成资产总大小，后续分段与校验全按错值走。
@@ -412,7 +426,7 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 
 **0.3.0（2026-10-30）**：第一个可以长期用的版本。仓库内部曾按 P1/P2/P3 拆成 0.3.0/0.4.0/0.4.1 三段编号，但一条都没发布过；为了不跳号，统一收回成 **0.3.0** 一次发。
 
-- **一次性 runner**：新增 `scripts/ghdl.ps1`（由 `scripts/build-runner.ps1` 从 `SKILL.md` 的 12 个代码块生成，`-Check` 可检测文档与成品的漂移）和 `scripts/ghdl.sh`（POSIX）。装好后可以不走 agent 直接命令行跑，参数 `-Url` / `-OutDir` / `-Parts` / `-ForceClean` / `-KeepParts`。
+- **一次性 runner**：新增 `scripts/ghdl.ps1`（由 `scripts/build-runner.ps1` 从 `references/runner-steps.md` 的 11 个代码块生成，`-Check` 可检测文档与成品的漂移）和 `scripts/ghdl.sh`（POSIX）。装好后可以不走 agent 直接命令行跑，参数 `-Url` / `-OutDir` / `-Parts` / `-ForceClean` / `-KeepParts`。
 - **frontmatter 收敛到最小公共集**（只留 `name` / `description`）：严格宿主遇到未知键会整条丢技能；两个阈值搬进正文参数表（`min_size_for_ladder_mb` / `single_conn_fast_kbps`），`validate.ps1` 校验正文表与代码里的 `$ladderMinMB`/`$fastKB` 是否同步。
 - **P2 并发引擎**：按单连接实测速度自适应段大小；多源路线池（只收 ≥35% 最快速度的前三条）；工作窃取（某段卡住就杀掉、换路线、续传重排队）；自适应起并发（4 起步，吞吐涨 15% 加 2、3 秒内卡 2 段砍半）；`curl --parallel` 单进程快路径（`GHDL_PARALLEL=1`）。同机同一资产：单流 31.2s / 自适应 32.3s / `--parallel` 31.6s / 杀段恢复 30.7s，全部字节精确。
 - **P3 可靠性**：任意 https 直链（自建 CDN、GitLab、内网制品库都行，用 1 字节 range 的 `Content-Range` 反推总长，只做字节校验）；断点续传 + 幂等（`_dl_parts/manifest.json` 记住分段方案，重跑沿用并跳过已下分片，成品已完整则 `ALREADY_DONE`）；孤儿进程收尾（先 `ORPHANS_KILLED` 再开工，杜绝两个进程写同一分片——实测写坏过 4.9MB）；逐段强校验（每段长度必须等于 `end-start+1`，否则 `SEGMENT_SIZE_MISMATCH` 并保留现场）；退出码只有真校验通过才是 0；`-ForceClean` / `-KeepParts`。
@@ -436,7 +450,7 @@ Ubuntu/macOS 侧 `bash -n scripts/ghdl.sh` + `run-tests-sh.sh`。
 - 并发不是越多越快：限速节点上 16 段最优、24/32 段回落；不限速节点上单流反而更快。最优值随节点漂移，所以每轮现场测。
 - **<100 MB 或单连接已 ≥3 MB/s 时不测量并发**（直接单流），因为阶梯要 20–26 秒、还可能顺带下载上百 MB 采样流量；想强制测就置 `$ForceLadder = $true`；想改门槛就改正文「可调参数」表与代码里的 `$ladderMinMB` / `$fastKB`（`validate.ps1` 会拦两处不一致）。
 - 镜像可用性完全取决于当时网络，全灭（全 `000`）是正常结果，此时只能退回直连多段。
-- **`SKILL.md` 余量很小**：第 0–10 步的 `powershell` 代码块是 `build-runner.ps1` 生成 `scripts/ghdl.ps1` 的唯一真源，**不能拆到 `references/`**；而 `validate.ps1` 又卡 64 KiB 上限。所以新增内容一律先放 `references/`，正文只加一行索引；余量不足 2 KB 时 `validate.ps1` 会打 `[INFO]` 提醒（不计告警，但别忽视）。
+- **`SKILL.md` 只当索引**：0–10 步的 11 个 `powershell` 代码块在 `references/runner-steps.md`，正文只留步骤说明与指针（`SKILL.md` 有 65,536 字节硬上限，宿主超限会直接拒收）。新增代码改 `references/runner-steps.md` 再跑 `build-runner.ps1`；新增说明优先放 `references/`。`validate.ps1` 会在 `SKILL.md` 超过 48 KB 时提示拆分。
 - **`--parallel` 不是默认路径，是有意的**：单进程 `--parallel` 跑 16 段实测 31.6s，同资产多进程自适应 32.3s，差值在噪声内；但 `--parallel -K` 只能整批跑完，某段卡死时没法只杀那一段再换源重排队。这套引擎的卖点是「卡住能自愈」，所以宁可用 0.7 秒换可靠性。
 
 ## 许可证
