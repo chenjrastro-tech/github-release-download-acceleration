@@ -2,6 +2,12 @@
 
 一个零依赖的 Windows PowerShell 技能：用户只说「这个包下太慢了」，它自己探清机器家底、实测选出最快路线、单流或分段并发下载，最后用 release 自带的 `digest` 做 SHA256 闭环校验。
 
+## 视频介绍
+
+[![2 分钟看懂：为什么它能让 GitHub 下载更快](assets/explainer-poster.png)](https://github.com/chenjrastro-tech/github-release-download-acceleration/releases/download/v0.3.5/github-release-download-acceleration-explainer.mp4)
+
+<sub>2 分 13 秒 · 中文讲解 + 英文字幕 · 原理演示，不替代下方基准数据。点击封面播放；GitHub README 不能直接内嵌 release 资产，所以使用封面链接。</sub>
+
 ## 1. 项目解决什么问题
 
 GitHub Release 的大资产（几十到几百 MB 的安装包、便携包）在国内网络下经常出现三种情况：
@@ -51,7 +57,7 @@ github-release-download-acceleration/
 │   ├── ghdl.sh           # macOS/Linux runner
 │   ├── ghdl-min.sh       # 单文件最小版（正文内联同一份）
 │   └── validate.ps1      # 自检脚本：结构 / frontmatter / 5.1 兼容性 / 代码块语法
-├── assets/               # 市场卡片图标与实测截图
+├── assets/               # 市场卡片图标、实测截图与视频封面
 └── screenshots.json      # 声明 1-8 张截图（市场详情页读取，放 package.json 旁边）
 ```
 
